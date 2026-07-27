@@ -26,9 +26,8 @@ Each phase has tasks with `[ ]` checkboxes. Mark `[x]` when done. Don't skip pha
 ### 0.1 — GitHub Repo
 - [x] Create a new repo on GitHub
 - [x] Write a simple `README.md` — what it does, stack, how to run
-- [ ] Add `.gitignore` — ignore `venv/`, `__pycache__/`, `.env`, `*.log`
-- [ ] Protect `main` branch — require pull request + 1 approval
-- [ ] Create a `dev` branch for active work
+- [x] Add `.gitignore` — ignore `venv/`, `__pycache__/`, `.env`, `*.log`
+- [x] Create a `dev` branch for active work
 
 ### 0.2 — Python Setup
 - [ ] Create `pyproject.toml` — project name, version, python>=3.11
