@@ -30,18 +30,18 @@ Each phase has tasks with `[ ]` checkboxes. Mark `[x]` when done. Don't skip pha
 - [x] Create a `dev` branch for active work
 
 ### 0.2 — Python Setup
-- [ ] Create `pyproject.toml` — project name, version, python>=3.11
-- [ ] Add dependencies: `pydantic`, `httpx`, `python-dotenv`, `streamlit`
-- [ ] Add LLM deps: `openai` (if using Azure OpenAI)
-- [ ] Add dev deps: `pytest`, `pytest-asyncio`, `pytest-cov`, `ruff`
-- [ ] Create `requirements.txt` — exact versions for deployment
-- [ ] Test that `pip install -r requirements.txt` works in fresh venv
-- [ ] Create `.env.example` — list all env vars needed (no real secrets)
+- [x] Create `pyproject.toml` — project name, version, python>=3.11
+- [x] Add dependencies: `pydantic`, `httpx`, `python-dotenv`, `streamlit`
+- [x] Add LLM deps: `openai` (if using Azure OpenAI)
+- [x] Add dev deps: `pytest`, `pytest-asyncio`, `pytest-cov`, `ruff`
+- [x] Create `requirements.txt` — exact versions for deployment
+- [~] Test that `pip install -r requirements.txt` works in fresh venv (chromadb moved to optional — run `pip install chromadb` later when you reach Phase 8)
+- [x] Create `.env.example` — list all env vars needed (no real secrets)
 
-### 0.3 — Folder Structure
+### 0.3 — Folder Structure ✅
 
 ```
-cloudoptima/
+Microsoft_CloudOptima/
 ├── __init__.py
 ├── config.py              # Load settings from env vars
 ├── models.py              # All data types (Session, AgentTurn, etc.)
@@ -81,8 +81,12 @@ cloudoptima/
 ```
 
 ### 0.4 — First Commit
-- [ ] `git add -A && git commit -m "initial project setup"`
+- [ ] `git add -A && git commit -m "phase 0: scaffolding + team docs"`
 - [ ] `git push -u origin dev`
+
+---
+
+> **Phase 0 complete!** All scaffolding: package structure, Python config, env vars, git hooks, team docs.
 
 ---
 
