@@ -23,19 +23,59 @@ Microsoft_CloudOptima is a multi-agent AI system that helps you design cloud arc
 
 ---
 
-## 🚧 Current Status
-
-**We just started.** This repo has the plan and vision — code is being built phase by phase.
+## 🚧 Current Status — Phase 0 Complete
 
 | Phase | Status |
 |-------|--------|
-| Planning & architecture | ✅ Complete |
-| Config & data models | ⏳ Next up |
-| Core engine | 📅 Planned |
-| Streamlit dashboard | 📅 Planned |
-| Azure deployment | 📅 Planned |
+| Phase 0 — Scaffolding | ✅ **Done** (package structure, config files, team setup) |
+| Phase 1 — Config + Models | ⏳ Next up |
+| Phase 2 — LLM Client + Cache | 📅 Planned |
+| Phase 3 — Input Sanitization | 📅 Planned |
+| Phase 4 — Base Agent Class | 📅 Planned |
+| Phase 5 — All 5 Agents | 📅 Planned |
+| Phase 6 — Orchestrator | 📅 Planned |
+| Phase 7 — Streamlit Dashboard | 📅 Planned |
+| Phases 8–14 | 📅 Planned |
 
-📋 **Full build checklist:** See [`BUILD_CHECKLIST.md`](./docs/BUILD_CHECKLIST.md)
+📋 **Full build checklist:** See [`docs/BUILD_CHECKLIST.md`](./docs/BUILD_CHECKLIST.md)
+
+---
+
+## 🛠️ Getting Started (For Team Members)
+
+### Prerequisites
+
+- **Python 3.11+** installed on your machine
+- **Git** installed
+- A **GitHub account** with access to this repo
+
+### Setup Instructions
+
+```cmd
+:: Step 1 — Clone the repository
+git clone https://github.com/G-Narendra/Microsoft_CloudOptima.git
+
+:: Step 2 — Switch to the dev branch (all work happens here)
+git checkout dev
+
+:: Step 3 — Create and activate a virtual environment
+python -m venv .venv
+.venv\Scripts\activate
+
+:: Step 4 — Install dependencies
+pip install -r requirements.txt
+
+:: Step 5 — Install the package in editable mode
+pip install -e .
+
+:: Step 6 — Set up your environment variables
+copy .env.example .env
+
+:: Step 7 — Verify everything works
+python -c "import cloudoptima; print('CloudOptima v' + cloudoptima.__version__)"
+```
+
+> **Note:** `chromadb` is optional — only needed for Phase 8 (Compliance RAG). Don't worry if you see it commented out in `requirements.txt`.
 
 ---
 
@@ -101,7 +141,7 @@ User describes infrastructure needs
 
 | Layer | Choice | Why |
 |-------|--------|-----|
-| Language | Python 3.11+ | great AI/ML ecosystem |
+| Language | Python 3.11+ | Great AI/ML ecosystem |
 | UI | Streamlit | Fast to build, perfect for internal tools |
 | LLMs | Nvidia NIM / Azure OpenAI | Free tier to start, scale when needed |
 | Data validation | Pydantic v2 | Type safety, JSON schema generation |
@@ -112,48 +152,27 @@ User describes infrastructure needs
 
 ---
 
-## Getting Started (Once We Build)
-
-```bash
-# Clone
-git clone https://github.com/G-Narendra/Microsoft_CloudOptima.git
-cd Microsoft_CloudOptima
-
-# Set up
-python -m venv venv
-venv\Scripts\activate     # On Mac OS: source venv/bin/activate
-pip install -r requirements.txt
-
-# Configure
-cp .env.example .env
-# Edit .env with your settings (demo mode works out of the box)
-
-# Run
-streamlit run Microsoft_CloudOptima/dashboard.py
-```
-
-> **No API key needed to start** — demo mode uses mock data and runs instantly.
-
----
-
 ## Project Structure
 
 ```
-Microsoft_CLoudOptima/
-├── config.py              # App settings & env vars
-├── models.py              # Data types (Session, AgentTurn, etc.)
-├── llm_client.py          # LLM providers (mock, Nvidia, Azure)
-├── llm_cache.py           # Response caching
-├── agent_base.py          # Base agent class
-├── sanitize.py            # Input/output cleaning
-├── observability.py       # Logging & tracing
-├── health.py              # Health checks
-├── orchestrator.py        # Multi-agent pipeline
-├── dashboard.py           # Streamlit UI
-├── agents/                # 5 AI agents
-├── compliance/            # Compliance rules + RAG
-├── pricing/               # Cost data + APIs
-└── tests/                 # Test suite
+Microsoft_CloudOptima/
+│
+├── .env.example              # Environment variable template
+├── .gitignore                # Git ignore rules
+├── pyproject.toml            # Project metadata + tool config
+├── requirements.txt          # Python dependencies
+├── README.md                 # This file
+│
+├── cloudoptima/              # Python package (all code lives here)
+│   ├── __init__.py
+│   ├── agents/               # 5 AI agents (to be built)
+│   ├── compliance/           # Compliance rules (to be built)
+│   ├── pricing/              # Pricing data (to be built)
+│   └── tests/                # Test suite (to be built)
+│
+└── docs/
+    ├── BUILD_CHECKLIST.md    # Phase-by-phase task tracker
+    └── DECISIONS.md          # Architecture decision log
 ```
 
 ---
@@ -169,15 +188,8 @@ We're building security into every layer from day one:
 - **Audit logging** — Append-only logs, never modified after writing
 - **Penetration testing** — Dedicated test suite for attack scenarios
 
-See [`BUILD_CHECKLIST.md`](./docs/BUILD_CHECKLIST.md) → Phase 10 for full details.
+See [`docs/BUILD_CHECKLIST.md`](./docs/BUILD_CHECKLIST.md) → Phase 10 for full details.
 
 ---
 
-
-## Team
-
-Built by a student team collaborating with Microsoft engineers. This project started as an industry-academia collaboration to explore multi-agent AI systems for cloud architecture Optimization.
-
----
-
-*Early stage — everything is a work in progress. Check the build checklist for what's being built next.*
+*Phase 0 complete — ready to build Phase 1.*

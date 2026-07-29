@@ -19,7 +19,7 @@ Each phase has tasks with `[ ]` checkboxes. Mark `[x]` when done. Don't skip pha
 
 ---
 
-## Phase 0: Getting Started (Day 1)
+## Phase 0: Getting Started ✅ COMPLETE
 
 > **Goal:** Set up Python, project folders, and git. Everyone on the same page.
 
@@ -32,61 +32,22 @@ Each phase has tasks with `[ ]` checkboxes. Mark `[x]` when done. Don't skip pha
 ### 0.2 — Python Setup
 - [x] Create `pyproject.toml` — project name, version, python>=3.11
 - [x] Add dependencies: `pydantic`, `httpx`, `python-dotenv`, `streamlit`
-- [x] Add LLM deps: `openai` (if using Azure OpenAI)
+- [x] Add LLM deps: `openai` (used for Azure OpenAI and Nvidia NIM)
 - [x] Add dev deps: `pytest`, `pytest-asyncio`, `pytest-cov`, `ruff`
 - [x] Create `requirements.txt` — exact versions for deployment
-- [~] Test that `pip install -r requirements.txt` works in fresh venv (chromadb moved to optional — run `pip install chromadb` later when you reach Phase 8)
+- [x] Test that `pip install -r requirements.txt` works in fresh venv
 - [x] Create `.env.example` — list all env vars needed (no real secrets)
 
-### 0.3 — Folder Structure ✅
-
-```
-Microsoft_CloudOptima/
-├── __init__.py
-├── config.py              # Load settings from env vars
-├── models.py              # All data types (Session, AgentTurn, etc.)
-├── llm_client.py          # Talk to LLMs (mock, Nvidia, Azure)
-├── llm_cache.py           # Cache LLM responses (SHA-256 key, TTL)
-├── agent_base.py          # Base class all agents inherit from
-├── sanitize.py            # Clean inputs and outputs
-├── observability.py       # Logging + tracing
-├── health.py              # Health check endpoints
-├── orchestrator.py        # Run all agents + detect conflicts
-├── app.py                 # Entry point
-├── dashboard.py           # Streamlit UI
-├── agents/
-│   ├── __init__.py
-│   ├── architect.py       # Designs compute/storage/network
-│   ├── cost_analyst.py    # Estimates pricing
-│   ├── security.py        # Finds vulnerabilities
-│   ├── compliance.py      # Checks regulations
-│   └── judge.py           # Resolves agent disagreements
-├── compliance/
-│   ├── __init__.py
-│   ├── rules.py           # 21 compliance rules
-│   └── rag.py             # ChromaDB for edge cases
-├── pricing/
-│   ├── __init__.py
-│   ├── static_db.py       # Hardcoded Azure prices
-│   └── azure_api.py       # Live Azure Pricing API
-└── tests/
-    ├── __init__.py
-    ├── conftest.py         # Shared test data
-    ├── test_models.py
-    ├── test_sanitize.py
-    ├── test_llm_cache.py
-    ├── test_agents.py
-    ├── test_orchestrator.py
-    └── test_security.py
-```
+### 0.3 — Folder Structure
+- [x] Create `cloudoptima/` package directory with all sub-packages
+- [x] Create `__init__.py` in all packages
+- [x] Create `docs/DECISIONS.md` for architecture decisions
 
 ### 0.4 — First Commit
-- [ ] `git add -A && git commit -m "phase 0: scaffolding + team docs"`
-- [ ] `git push -u origin dev`
+- [x] `git add -A && git commit -m "phase 0: project scaffolding completed"`
+- [x] `git push -u origin dev`
 
----
-
-> **Phase 0 complete!** All scaffolding: package structure, Python config, env vars, git hooks, team docs.
+> **Phase 0 complete!** All scaffolding: package structure, Python config files, env vars, git ignores, team setup docs.
 
 ---
 
@@ -94,7 +55,7 @@ Microsoft_CloudOptima/
 
 > **Goal:** Type-safe settings and data structures. Everything else depends on this.
 
-### 1.1 — Config File (`config.py`)
+### 1.1 — Config File (`cloudoptima/config.py`)
 - [ ] Create `Settings` class that reads from `.env` and env vars
 - [ ] Store: API keys, model name, temperature, timeout
 - [ ] Store: debug flag, demo mode toggle, rate limit settings
@@ -103,7 +64,7 @@ Microsoft_CloudOptima/
 - [ ] Store: max input length, blocked patterns
 - [ ] **Security:** Never print API keys in logs or error messages
 
-### 1.2 — Data Models (`models.py`)
+### 1.2 — Data Models (`cloudoptima/models.py`)
 - [ ] `AgentType` — ARCHITECT, COST_ANALYST, SECURITY, COMPLIANCE, JUDGE
 - [ ] `WorkloadType` — REALTIME, BATCH, STREAMING, MIXED
 - [ ] `DeploymentScale` — SMALL, MEDIUM, LARGE, ENTERPRISE
@@ -126,7 +87,7 @@ Microsoft_CloudOptima/
 
 > **Goal:** Talk to AI models. Cache responses so we don't repeat work. Mock mode for fast dev.
 
-### 2.1 — LLM Client (`llm_client.py`)
+### 2.1 — LLM Client (`cloudoptima/llm_client.py`)
 - [ ] Define a base class with `generate(prompt, system_prompt) -> str`
 - [ ] **MockClient** — returns canned responses (great for demo and testing)
 - [ ] **NvidiaClient** — calls Nvidia NIM API via httpx
@@ -136,7 +97,7 @@ Microsoft_CloudOptima/
 - [ ] **Security:** Strip weird characters from LLM responses
 - [ ] **Security:** Hard timeout per request (don't wait forever)
 
-### 2.2 — Cache (`llm_cache.py`)
+### 2.2 — Cache (`cloudoptima/llm_cache.py`)
 - [ ] Cache key = SHA-256 hash of (prompt + system prompt + model + temp)
 - [ ] Store as compressed JSON (gzip to save space)
 - [ ] Auto-expire: return None if cached item is too old
@@ -157,7 +118,7 @@ Microsoft_CloudOptima/
 
 > **Goal:** Clean everything that enters or leaves the system. No nasty surprises.
 
-### 3.1 — Sanitizer (`sanitize.py`)
+### 3.1 — Sanitizer (`cloudoptima/sanitize.py`)
 - [ ] `clean_input(text)` — strip null bytes, control chars, truncate long text
 - [ ] `clean_output(text)` — strip ANSI codes, prevent prompt leakage
 - [ ] `try_parse_json(text)` — try to parse, return (data, error) — never crash
@@ -188,7 +149,7 @@ Microsoft_CloudOptima/
 
 > **Goal:** One base class. All 5 agents use it. No repeated code.
 
-### 4.1 — Base Agent (`agent_base.py`)
+### 4.1 — Base Agent (`cloudoptima/agent_base.py`)
 - [ ] `BaseAgent` with:
   - `agent_type` — which agent this is
   - `llm_client` — injected when created
@@ -265,7 +226,7 @@ Microsoft_CloudOptima/
 - **Arbitration:** `conflicts_detected` (count), `conflict_summaries` (list with dimension/issue/resolution)
 - **Security:** Judge can override recommendations but can NEVER disable security controls. Validation rejects "disable_encryption" or "disable_mfa"
 
-### 5.6 — Package Init (`agents/__init__.py`)
+### 5.6 — Package Init (`cloudoptima/agents/__init__.py`)
 - [ ] Export all 5 agent classes
 - [ ] `ALL_AGENTS` list for easy iteration
 - [ ] Display names for UI
@@ -283,7 +244,7 @@ Microsoft_CloudOptima/
 
 > **Goal:** Run all 5 agents → detect conflicts → Judge resolves → generate final artifacts.
 
-### 6.1 — Orchestrator (`orchestrator.py`)
+### 6.1 — Orchestrator (`cloudoptima/orchestrator.py`)
 - [ ] Takes list of agents + config
 - [ ] `run(session)` does:
   1. Run agents in order: Architect → Cost → Security → Compliance (record timing)
@@ -302,7 +263,7 @@ Microsoft_CloudOptima/
 
 - [ ] **Security:** If any agent output is broken, orchestrator catches it and logs a failed turn. Never crashes.
 
-### 6.2 — App Entry Point (`app.py`)
+### 6.2 — App Entry Point (`cloudoptima/app.py`)
 - [ ] `create_orchestrator(settings)` — wires everything together
 - [ ] `main()` for CLI testing (input JSON → output JSON)
 - [ ] **Security:** Never print API keys in debug output
@@ -320,7 +281,7 @@ Microsoft_CloudOptima/
 
 > **Goal:** Simple, clean UI. Form → progress → results.
 
-### 7.1 — Dashboard (`dashboard.py`)
+### 7.1 — Dashboard (`cloudoptima/dashboard.py`)
 
 **Sidebar:**
 - [ ] App name + description
@@ -373,23 +334,23 @@ Microsoft_CloudOptima/
 
 > **Goal:** Helper modules agents can reference.
 
-### 8.1 — Compliance Rules (`compliance/rules.py`)
+### 8.1 — Compliance Rules (`cloudoptima/compliance/rules.py`)
 - [ ] 21 rules covering: data residency, encryption, access control, audit logging, retention, incident response, vendor assessment, DR, network security, identity
 - [ ] **Security:** Rules are immutable (tuple/frozenset)
 
-### 8.2 — Compliance RAG (`compliance/rag.py`)
+### 8.2 — Compliance RAG (`cloudoptima/compliance/rag.py`)
 - [ ] ChromaDB for compliance edge cases
 - [ ] `seed_docs()` — index compliance docs
 - [ ] `query_rag(query, framework)` — return relevant passages
 - [ ] **Security:** RAG results treated as untrusted — cleaned before sending to LLM
 
-### 8.3 — Static Pricing (`pricing/static_db.py`)
+### 8.3 — Static Pricing (`cloudoptima/pricing/static_db.py`)
 - [ ] Dictionary of Azure service prices
 - [ ] `lookup(service, region, tier)` — get price
 - [ ] `estimate(config)` — estimate monthly cost
 - [ ] **Security:** Prices are read-only
 
-### 8.4 — Azure Pricing API (`pricing/azure_api.py`)
+### 8.4 — Azure Pricing API (`cloudoptima/pricing/azure_api.py`)
 - [ ] `get_price(service, region, meter_id)` — live API call (free, no auth)
 - [ ] `estimate_live(config)` — real-time estimate
 - [ ] Cache results for 1 hour
@@ -405,7 +366,7 @@ Microsoft_CloudOptima/
 
 > **Goal:** Know when things break. Have a record of what happened.
 
-### 9.1 — Observability (`observability.py`)
+### 9.1 — Observability (`cloudoptima/observability.py`)
 - [ ] `TraceEvent` — records: event type, agent, latency, tokens, timestamp
 - [ ] `AuditLogger` — writes to daily JSONL files (`logs/audit-2026-07-27.jsonl`)
 - [ ] `query(start, end, agent_type)` — filter past events
@@ -414,7 +375,7 @@ Microsoft_CloudOptima/
 - [ ] **Security:** Never log API keys, passwords, or secrets
 - [ ] **Security:** Logs are append-only — never modified after writing
 
-### 9.2 — Health Checks (`health.py`)
+### 9.2 — Health Checks (`cloudoptima/health.py`)
 - [ ] Registry with `register(name, check_fn)` decorator
 - [ ] `check_all()` — runs all checks, returns pass/fail per check
 - [ ] `overall_status()` — "healthy"/"degraded"/"unhealthy"
@@ -607,4 +568,4 @@ Microsoft_CloudOptima/
 ---
 
 > **Updated:** July 2026
-> **Status:**  Ready to build
+> **Phase 0 complete — ready for Phase 1.**
