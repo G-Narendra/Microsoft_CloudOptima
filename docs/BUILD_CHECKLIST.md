@@ -122,34 +122,34 @@ Microsoft_CloudOptima/
 
 ---
 
-## Phase 2: LLM Client + Cache (Day 2-3)
+## Phase 2: LLM Client + Cache (Day 2-3) ✅ COMPLETE
 
 > **Goal:** Talk to AI models. Cache responses so we don't repeat work. Mock mode for fast dev.
 
-### 2.1 — LLM Client (`llm_client.py`)
-- [ ] Define a base class with `generate(prompt, system_prompt) -> str`
-- [ ] **MockClient** — returns canned responses (great for demo and testing)
-- [ ] **NvidiaClient** — calls Nvidia NIM API via httpx
-- [ ] **AzureClient** — calls Azure OpenAI, supports JSON mode
-- [ ] Factory function: `create_llm_client("mock"|"nvidia"|"azure", config)`
-- [ ] Wrapper with retry logic: try 3 times, wait longer each time
-- [ ] **Security:** Strip weird characters from LLM responses
-- [ ] **Security:** Hard timeout per request (don't wait forever)
+### 2.1 — LLM Client (`cloudoptima/llm_client.py`)
+- [x] Define a base class with `generate(prompt, system_prompt) -> str`
+- [x] **MockClient** — returns canned responses (great for demo and testing)
+- [x] **NvidiaClient** — calls Nvidia NIM API via httpx
+- [x] **AzureClient** — calls Azure OpenAI, supports JSON mode
+- [x] Factory function: `create_llm_client("mock"|"nvidia"|"azure", config)`
+- [x] Wrapper with retry logic: try 3 times, wait longer each time
+- [x] **Security:** Strip weird characters from LLM responses
+- [x] **Security:** Hard timeout per request (don't wait forever)
 
-### 2.2 — Cache (`llm_cache.py`)
-- [ ] Cache key = SHA-256 hash of (prompt + system prompt + model + temp)
-- [ ] Store as compressed JSON (gzip to save space)
-- [ ] Auto-expire: return None if cached item is too old
-- [ ] If cache gets too big, remove oldest 20%
-- [ ] Thread-safe (use a lock)
-- [ ] If anything goes wrong with cache, just return None (don't crash)
-- [ ] **Security:** Don't cache error responses or API keys
+### 2.2 — Cache (`cloudoptima/llm_cache.py`)
+- [x] Cache key = SHA-256 hash of (prompt + system prompt + model + temp)
+- [x] Store as compressed JSON (gzip to save space)
+- [x] Auto-expire: return None if cached item is too old
+- [x] If cache gets too big, remove oldest 20%
+- [x] Thread-safe (use a lock)
+- [x] If anything goes wrong with cache, just return None (don't crash)
+- [x] **Security:** Don't cache error responses or API keys
 
 ### 2.3 — Test the LLM Layer
-- [ ] MockClient returns correct response for each agent type
-- [ ] Cache hit returns same value
-- [ ] Cache miss calls the LLM
-- [ ] Old cache entries are skipped
+- [x] MockClient returns correct response for each agent type
+- [x] Cache hit returns same value
+- [x] Cache miss calls the LLM
+- [x] Old cache entries are skipped
 
 ---
 
@@ -611,4 +611,4 @@ Microsoft_CloudOptima/
 ---
 
 > **Updated:** July 2026
-> **Phase 1 complete — ready for Phase 2.**
+> **Phase 2 complete — ready for Phase 3.**

@@ -23,14 +23,14 @@ Microsoft_CloudOptima is a multi-agent AI system that helps you design cloud arc
 
 ---
 
-## 🚧 Current Status — Phase 1 Complete
+## 🚧 Current Status — Phase 2 Complete
 
 | Phase | Status |
 |-------|--------|
 | Phase 0 — Scaffolding | ✅ **Done** (package structure, config files, team setup) |
 | Phase 1 — Config + Models | ✅ **Done** (type-safe Settings, domain models, enums, null byte sanitization) |
-| Phase 2 — LLM Client + Cache | ⏳ Next up |
-| Phase 3 — Input Sanitization | 📅 Planned |
+| Phase 2 — LLM Client + Cache | ✅ **Done** (MockClient, NvidiaClient, AzureClient, retry wrapper, gzip cache) |
+| Phase 3 — Input Sanitization | ⏳ Next up |
 | Phase 4 — Base Agent Class | 📅 Planned |
 | Phase 5 — All 5 Agents | 📅 Planned |
 | Phase 6 — Orchestrator | 📅 Planned |
