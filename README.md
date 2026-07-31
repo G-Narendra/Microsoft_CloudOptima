@@ -23,17 +23,19 @@ Microsoft_CloudOptima is a multi-agent AI system that helps you design cloud arc
 
 ---
 
-## 🚧 Current Status
-
-**We just started.** This repo has the plan and vision — code is being built phase by phase.
+## 🚧 Current Status — Phase 1 Complete
 
 | Phase | Status |
 |-------|--------|
-| Planning & architecture | ✅ Complete |
-| Config & data models | ⏳ Next up |
-| Core engine | 📅 Planned |
-| Streamlit dashboard | 📅 Planned |
-| Azure deployment | 📅 Planned |
+| Phase 0 — Scaffolding | ✅ **Done** (package structure, config files, team setup) |
+| Phase 1 — Config + Models | ✅ **Done** (type-safe Settings, domain models, enums, null byte sanitization) |
+| Phase 2 — LLM Client + Cache | ⏳ Next up |
+| Phase 3 — Input Sanitization | 📅 Planned |
+| Phase 4 — Base Agent Class | 📅 Planned |
+| Phase 5 — All 5 Agents | 📅 Planned |
+| Phase 6 — Orchestrator | 📅 Planned |
+| Phase 7 — Streamlit Dashboard | 📅 Planned |
+| Phases 8–14 | 📅 Planned |
 
 📋 **Full build checklist:** See [`BUILD_CHECKLIST.md`](./docs/BUILD_CHECKLIST.md)
 

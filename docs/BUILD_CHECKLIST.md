@@ -90,35 +90,35 @@ Microsoft_CloudOptima/
 
 ---
 
-## Phase 1: Config & Data Models (Day 1-2)
+## Phase 1: Config & Data Models (Day 1-2) ✅ COMPLETE
 
 > **Goal:** Type-safe settings and data structures. Everything else depends on this.
 
-### 1.1 — Config File (`config.py`)
-- [ ] Create `Settings` class that reads from `.env` and env vars
-- [ ] Store: API keys, model name, temperature, timeout
-- [ ] Store: debug flag, demo mode toggle, rate limit settings
-- [ ] Store: Azure subscription info
-- [ ] Store: cache TTL, max cache size
-- [ ] Store: max input length, blocked patterns
-- [ ] **Security:** Never print API keys in logs or error messages
+### 1.1 — Config File (`cloudoptima/config.py`)
+- [x] Create `Settings` class that reads from `.env` and env vars
+- [x] Store: API keys, model name, temperature, timeout
+- [x] Store: debug flag, demo mode toggle, rate limit settings
+- [x] Store: Azure subscription info
+- [x] Store: cache TTL, max cache size
+- [x] Store: max input length, blocked patterns
+- [x] **Security:** Never print API keys in logs or error messages
 
-### 1.2 — Data Models (`models.py`)
-- [ ] `AgentType` — ARCHITECT, COST_ANALYST, SECURITY, COMPLIANCE, JUDGE
-- [ ] `WorkloadType` — REALTIME, BATCH, STREAMING, MIXED
-- [ ] `DeploymentScale` — SMALL, MEDIUM, LARGE, ENTERPRISE
-- [ ] `AzureRegion` — all major regions
-- [ ] `ComplianceFramework` — PDPL, HIPAA, SOC2, ISO27001, GDPR
-- [ ] `AgentTurn` — agent type + output dict + latency + tokens
-- [ ] `Conflict` — which agents disagreed + issue + resolution
-- [ ] `Artifact` — generated file (IaC template, cost report, etc.)
-- [ ] `Session` — all user inputs + results (agents, conflicts, artifacts)
-- [ ] **Security:** Strip null bytes from all text fields automatically
+### 1.2 — Data Models (`cloudoptima/models.py`)
+- [x] `AgentType` — ARCHITECT, COST_ANALYST, SECURITY, COMPLIANCE, JUDGE
+- [x] `WorkloadType` — REALTIME, BATCH, STREAMING, MIXED
+- [x] `DeploymentScale` — SMALL, MEDIUM, LARGE, ENTERPRISE
+- [x] `AzureRegion` — all major regions
+- [x] `ComplianceFramework` — PDPL, HIPAA, SOC2, ISO27001, GDPR
+- [x] `AgentTurn` — agent type + output dict + latency + tokens
+- [x] `Conflict` — which agents disagreed + issue + resolution
+- [x] `Artifact` — generated file (IaC template, cost report, etc.)
+- [x] `Session` — all user inputs + results (agents, conflicts, artifacts)
+- [x] **Security:** Strip null bytes from all text fields automatically
 
 ### 1.3 — Quick Tests
-- [ ] Create a Session with all fields — works
-- [ ] Put null byte in project name — rejected
-- [ ] Session → dict → Session (round trip) — works
+- [x] Create a Session with all fields — works
+- [x] Put null byte in project name — rejected
+- [x] Session → dict → Session (round trip) — works
 
 ---
 
@@ -611,4 +611,4 @@ Microsoft_CloudOptima/
 ---
 
 > **Updated:** July 2026
-> **Status:**  Ready to build
+> **Phase 1 complete — ready for Phase 2.**
