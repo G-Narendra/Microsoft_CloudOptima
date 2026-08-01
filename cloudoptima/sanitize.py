@@ -31,10 +31,12 @@ __all__ = [
     "DEFAULT_MAX_LENGTH",
     "clean_input",
     "clean_output",
+    "compile_blocked_patterns",
     "detect_injection",
     "extract_json",
     "rate_limit",
     "reset_rate_limits",
+    "scan_for_malware_in_iac",
     "try_parse_json",
 ]
 
@@ -126,6 +128,19 @@ _CONFUSABLE_TABLE = str.maketrans(_CONFUSABLES)
 _JSON_OBJECT = re.compile(r"\{.*\}", re.S)
 _JSON_ARRAY = re.compile(r"\[.*\]", re.S)
 _CODE_FENCE = re.compile(r"```(?:json|javascript)?\s*(.*?)```", re.S | re.I)
+
+# Executable primitives that must never appear in generated IaC templates.
+_MALWARE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bexec\s*\("),
+    re.compile(r"\beval\s*\("),
+    re.compile(r"\bos\.system\s*\("),
+    re.compile(r"\bsubprocess\s*\."),
+    re.compile(r"\b__import__\s*\("),
+    re.compile(r"\bsys\.modules\b"),
+    re.compile(r"\b(?:cmd|powershell|bash|sh)\s*-c\s*[\"']"),
+    re.compile(r"\$\s*\("),  # $(command) shell substitution
+    re.compile(r"`[^`\n]+`"),  # backtick command substitution
+)
 
 
 def _normalize_unicode(text: str) -> str:
@@ -219,6 +234,50 @@ def clean_output(text: object, max_length: int = DEFAULT_MAX_LENGTH * 10) -> str
     if max_length >= 0 and len(text) > max_length:
         text = text[:max_length].rstrip()
     return text
+
+
+def scan_for_malware_in_iac(iac_content: object) -> list[str]:
+    """Scan generated IaC content for executable/malicious primitives.
+
+    Called before an artifact is committed to the session, so a model that
+    echoes back an injected payload (e.g. ``exec('rm -rf /')``) gets caught
+    before it reaches the dashboard.
+
+    Args:
+        iac_content: The raw IaC template text to inspect.
+
+    Returns:
+        A list of the matched malicious substrings (empty when clean).
+    """
+    if not isinstance(iac_content, str) or not iac_content.strip():
+        return []
+    matches: list[str] = []
+    for pattern in _MALWARE_PATTERNS:
+        found = pattern.search(iac_content)
+        if found:
+            matches.append(found.group(0))
+    return matches
+
+
+def compile_blocked_patterns() -> dict[str, list[re.Pattern[str]]]:
+    """Return the compiled defense regexes grouped by attack category.
+
+    Categories: ``sql_injection``, ``xss``, ``path_traversal``. (Unicode
+    homoglyphs are handled by the NFKC + confusable-table fold in
+    ``_normalize_unicode``, which is not expressible as a single regex, so no
+    ``unicode_tricks`` entry exists here.)
+
+    Useful for tooling, dashboards, or tests that need to enumerate the exact
+    patterns the sanitizer enforces.
+
+    Returns:
+        Mapping of category name to list of compiled patterns.
+    """
+    return {
+        "sql_injection": [_SQL_COMMENT, _SQL_QUOTES],
+        "xss": [_SCRIPT_BLOCK, _DANGLING_SCRIPT, _HTML_TAG, _EVENT_HANDLER, _JS_SCHEME],
+        "path_traversal": [_PATH_TRAVERSAL],
+    }
 
 
 def try_parse_json(text: object) -> tuple[Any | None, str | None]:

@@ -35,7 +35,8 @@ Microsoft_CloudOptima is a multi-agent AI system that helps you design cloud arc
 | Phase 5 — All 5 Agents | 📅 Planned |
 | Phase 6 — Orchestrator | 📅 Planned |
 | Phase 7 — Streamlit Dashboard | 📅 Planned |
-| Phases 8–14 | 📅 Planned |
+| Phase 9 — Logging & Health Checks | ✅ **Done** (audit logging, @trace, health registry) |
+| Phases 8, 10–14 | 📅 Planned |
 
 📋 **Full build checklist:** See [`docs/BUILD_CHECKLIST.md`](./docs/BUILD_CHECKLIST.md)
 

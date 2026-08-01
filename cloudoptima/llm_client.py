@@ -18,7 +18,7 @@ import openai
 
 from cloudoptima.config import Settings
 
-logger = logging.getLogger(__name__)
+_logger = logging.getLogger(__name__)
 
 
 # ── Control Character Sanitization ────────────────────────────────────────────
@@ -284,7 +284,7 @@ class NvidiaClient(BaseLLMClient):
 
         content: str = data["choices"][0]["message"]["content"]
         if not content:
-            logger.warning("NvidiaClient received empty response")
+            _logger.warning("NvidiaClient received empty response")
             return ""
         return _strip_control_chars(content)
 
@@ -341,7 +341,7 @@ class AzureClient(BaseLLMClient):
 
         content = response.choices[0].message.content
         if not content:
-            logger.warning("AzureClient received empty response")
+            _logger.warning("AzureClient received empty response")
             return ""
         return _strip_control_chars(content)
 
@@ -415,7 +415,7 @@ def generate_with_retry(
             last_exception = exc
             if attempt < max_retries - 1:
                 delay = base_delay * (2**attempt)
-                logger.warning(
+                _logger.warning(
                     "LLM request failed (attempt %d/%d): %s. "
                     "Retrying in %.1fs...",
                     attempt + 1,
@@ -425,7 +425,7 @@ def generate_with_retry(
                 )
                 time.sleep(delay)
             else:
-                logger.error(
+                _logger.error(
                     "LLM request failed after %d attempts: %s",
                     max_retries,
                     str(exc),

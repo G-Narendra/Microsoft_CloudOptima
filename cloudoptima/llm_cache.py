@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-logger = logging.getLogger(__name__)
+_logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -99,7 +99,7 @@ class LLMCache:
             del self._store[key]
             self._stats.evictions += 1
 
-        logger.info(
+        _logger.info(
             "Cache eviction: removed %d entries, %d remaining",
             count_to_remove,
             len(self._store),
@@ -136,7 +136,7 @@ class LLMCache:
                 if age > self._ttl_seconds:
                     del self._store[key]
                     self._stats.misses += 1
-                    logger.debug("Cache entry expired (age=%.0fs)", age)
+                    _logger.debug("Cache entry expired (age=%.0fs)", age)
                     return None
 
                 # Decompress and return
@@ -145,7 +145,7 @@ class LLMCache:
                 return raw.decode("utf-8")
 
         except Exception:
-            logger.warning("Cache get error", exc_info=True)
+            _logger.warning("Cache get error", exc_info=True)
             self._stats.errors += 1
             return None
 
@@ -172,7 +172,7 @@ class LLMCache:
         try:
             # Security: don't cache error responses
             if self._is_error_response(response):
-                logger.debug("Skipping cache for error response")
+                _logger.debug("Skipping cache for error response")
                 return
 
             key = self._make_key(prompt, system_prompt, model, temperature)
@@ -190,14 +190,14 @@ class LLMCache:
                     self._evict_oldest()
 
         except Exception:
-            logger.warning("Cache put error", exc_info=True)
+            _logger.warning("Cache put error", exc_info=True)
             self._stats.errors += 1
 
     def clear(self) -> None:
         """Remove all entries from the cache."""
         with self._lock:
             self._store.clear()
-            logger.info("Cache cleared")
+            _logger.info("Cache cleared")
 
     def stats(self) -> dict[str, Any]:
         """Return cache statistics.

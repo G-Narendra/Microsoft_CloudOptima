@@ -7,10 +7,7 @@ import threading
 import time
 from unittest.mock import patch
 
-import pytest
-
 from cloudoptima.llm_cache import LLMCache
-
 
 # ── Cache Hit / Miss ──────────────────────────────────────────────────────────
 

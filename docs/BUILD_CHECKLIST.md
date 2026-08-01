@@ -116,7 +116,7 @@ Each phase has tasks with `[ ]` checkboxes. Mark `[x]` when done. Don't skip pha
 
 ---
 
-## Phase 3: Input/Output Sanitization (Day 3)
+## Phase 3: Input/Output Sanitization (Day 3) ✅ COMPLETE
 
 > **Goal:** Clean everything that enters or leaves the system. No nasty surprises.
 
@@ -374,26 +374,26 @@ Each phase has tasks with `[ ]` checkboxes. Mark `[x]` when done. Don't skip pha
 > **Goal:** Know when things break. Have a record of what happened.
 
 ### 9.1 — Observability (`cloudoptima/observability.py`)
-- [ ] `TraceEvent` — records: event type, agent, latency, tokens, timestamp
-- [ ] `AuditLogger` — writes to daily JSONL files (`logs/audit-2026-07-27.jsonl`)
-- [ ] `query(start, end, agent_type)` — filter past events
-- [ ] Auto-delete logs older than 90 days
-- [ ] `@trace` decorator — wrap any function to auto-log timing
-- [ ] **Security:** Never log API keys, passwords, or secrets
-- [ ] **Security:** Logs are append-only — never modified after writing
+- [x] `TraceEvent` — records: event type, agent, latency, tokens, timestamp
+- [x] `AuditLogger` — writes to daily JSONL files (`logs/audit-YYYY-MM-DD.jsonl`)
+- [x] `query(start, end, agent_type)` — filter past events
+- [x] Auto-delete logs older than 90 days
+- [x] `@trace` decorator — wrap any function to auto-log timing
+- [x] **Security:** Never log API keys, passwords, or secrets
+- [x] **Security:** Logs are append-only — never modified after writing
 
 ### 9.2 — Health Checks (`cloudoptima/health.py`)
-- [ ] Registry with `register(name, check_fn)` decorator
-- [ ] `check_all()` — runs all checks, returns pass/fail per check
-- [ ] `overall_status()` — "healthy"/"degraded"/"unhealthy"
-- [ ] Pre-built checks: LLM client ping, cache test, disk space, memory
+- [x] Registry with `register(name, check_fn)` decorator
+- [x] `check_all()` — runs all checks, returns pass/fail per check
+- [x] `overall_status()` — "healthy"/"degraded"/"unhealthy"
+- [x] Pre-built checks: LLM client ping, cache test, disk space, memory, python version, audit log dir
 
 ### 9.3 — Test Logging
-- [ ] TraceEvent creates and serializes correctly
-- [ ] AuditLogger writes to correct daily file
-- [ ] Query filters work
-- [ ] @trace captures timing correctly
-- [ ] check_all() returns all registered checks
+- [x] TraceEvent creates and serializes correctly (round-trip: dict → event → dict)
+- [x] AuditLogger writes to correct daily file (`logs/audit-YYYY-MM-DD.jsonl`)
+- [x] Query filters work (by date range, agent_name, event_type)
+- [x] @trace captures timing correctly (success and error branches)
+- [x] check_all() returns all 6 registered checks → overall_status() reports healthy
 
 ---
 
@@ -576,4 +576,4 @@ Each phase has tasks with `[ ]` checkboxes. Mark `[x]` when done. Don't skip pha
 
 > **Updated:** July 2026
 
-> **Phase 2 complete — ready for Phase 3.**
+> **Phases 0-3 + 9 complete — ready for Phase 4.**

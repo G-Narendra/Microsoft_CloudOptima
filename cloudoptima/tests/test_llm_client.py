@@ -20,7 +20,6 @@ from cloudoptima.llm_client import (
     generate_with_retry,
 )
 
-
 # ── MockClient Tests ─────────────────────────────────────────────────────────
 
 

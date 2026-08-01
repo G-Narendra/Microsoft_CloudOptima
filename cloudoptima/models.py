@@ -92,12 +92,17 @@ def sanitize_null_bytes(val: Any) -> Any:
 
 
 class SanitizedBaseModel(BaseModel):
-    """Base Pydantic model that strips null bytes from all text fields automatically."""
+    """Base Pydantic model that strips null bytes from all text fields automatically.
+
+    Extra fields are forbidden (``extra="forbid"``) so unexpected keys in LLM
+    output or user input fail validation instead of being silently accepted.
+    """
 
     model_config = ConfigDict(
         use_enum_values=True,
         populate_by_name=True,
         validate_assignment=True,
+        extra="forbid",
     )
 
     @model_validator(mode="before")
@@ -131,6 +136,10 @@ class AgentTurn(SanitizedBaseModel):
 class Conflict(SanitizedBaseModel):
     """Disagreement between two or more agents, with its issue description and resolution."""
 
+    dimension: str = Field(
+        default="",
+        description="Conflict dimension (e.g. cost_vs_security, architect_vs_compliance)",
+    )
     agents: list[AgentType] = Field(
         description="List of agents involved in the conflict (minimum 2)"
     )
@@ -155,6 +164,9 @@ class Artifact(SanitizedBaseModel):
     )
     name: str = Field(description="Filename or title of the artifact")
     type: str = Field(description="Type of artifact (e.g. iac_bicep, cost_report, diagram)")
+    format: str = Field(
+        default="text", description="Content format (e.g. bicep, terraform, json, text)"
+    )
     content: str = Field(description="Raw text content of the generated artifact")
     description: str = Field(default="", description="Summary description of the artifact")
 
@@ -178,6 +190,15 @@ class Session(SanitizedBaseModel):
     )
     compliance_frameworks: list[ComplianceFramework] = Field(
         default_factory=list, description="Target compliance standards"
+    )
+    budget: float | None = Field(
+        default=None, description="User-specified monthly budget in USD (None if not provided)"
+    )
+    services: str = Field(
+        default="", description="User-described services/stack (comma-separated text)"
+    )
+    status: str = Field(
+        default="pending", description="Pipeline status: pending, running, completed, failed"
     )
     user_prompt: str = Field(default="", description="Original user prompt or requirements text")
     agent_turns: list[AgentTurn] = Field(

