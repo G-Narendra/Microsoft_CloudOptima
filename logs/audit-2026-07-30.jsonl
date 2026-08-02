@@ -1,0 +1,2 @@
+{"event_type": "test", "agent_name": "TestAgent", "latency_ms": 42.5, "tokens_used": 100, "status": "success", "session_id": "", "extra": {}, "timestamp": "2026-07-30T12:37:50.826008Z"}
+{"event_type": "test", "agent_name": "TestAgent", "latency_ms": 42.5, "tokens_used": 100, "status": "success", "session_id": "", "extra": {}, "timestamp": "2026-07-30T12:39:36.517296Z"}
