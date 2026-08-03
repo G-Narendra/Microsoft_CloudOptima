@@ -30,7 +30,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Final, TypeVar
+from typing import Any, Final, TypeAlias, TypeVar
 
 # ── Module-level logger ────────────────────────────────────────────────
 _logger = logging.getLogger(__name__)
@@ -42,7 +42,7 @@ _DATETIME_FMT: Final[str] = "%Y-%m-%dT%H:%M:%S.%fZ"  # ISO 8601 UTC
 
 # ── Type variables ─────────────────────────────────────────────────────
 F = TypeVar("F", bound=Callable[..., Any])
-JsonSerializable: type = dict[str, Any] | list[Any] | str | int | float | bool | None
+JsonSerializable: TypeAlias = dict[str, Any] | list[Any] | str | int | float | bool | None
 
 
 # ── TraceEvent ─────────────────────────────────────────────────────────
@@ -84,7 +84,11 @@ class TraceEvent:
         """
         raw = dict(data)
         timestamp_str: str = raw.pop("timestamp", _utcnow_iso())
-        result = cls(**raw)
+        # Ignore unknown keys so a corrupt or hostile log line can never crash
+        # the reader — unmatched keys would otherwise raise TypeError here.
+        known = {name for name in cls.__dataclass_fields__ if name != "_timestamp"}
+        filtered = {k: v for k, v in raw.items() if k in known}
+        result = cls(**filtered)
         object.__setattr__(result, "_timestamp", timestamp_str)
         return result
 

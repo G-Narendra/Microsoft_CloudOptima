@@ -23,7 +23,7 @@ Microsoft_CloudOptima is a multi-agent AI system that helps you design cloud arc
 
 ---
 
-## 🚧 Current Status — Phase 3 Complete
+## 🚧 Current Status — Phase 5 Complete
 
 | Phase | Status |
 |-------|--------|
@@ -31,8 +31,8 @@ Microsoft_CloudOptima is a multi-agent AI system that helps you design cloud arc
 | Phase 1 — Config + Models | ✅ **Done** (type-safe Settings, domain models, enums, null byte sanitization) |
 | Phase 2 — LLM Client + Cache | ✅ **Done** (MockClient, NvidiaClient, AzureClient, retry wrapper, gzip cache) |
 | Phase 3 — Input Sanitization | ✅ **Done** (sanitization pipeline, JSON extraction, rate limiting) |
-| Phase 4 — Base Agent Class | 📅 Next up |
-| Phase 5 — All 5 Agents | 📅 Planned |
+| Phase 4 — Base Agent Class | ✅ **Done** (BaseAgent template method, prompt hardening, caching, error turns) |
+| Phase 5 — All 5 Agents | ✅ **Done** (Architect, Cost, Security, Compliance with 21 hardcoded rules, Judge) |
 | Phase 6 — Orchestrator | 📅 Planned |
 | Phase 7 — Streamlit Dashboard | 📅 Planned |
 | Phase 9 — Logging & Health Checks | ✅ **Done** (audit logging, @trace, health registry) |
@@ -166,7 +166,7 @@ Microsoft_CloudOptima/
 │
 ├── cloudoptima/              # Python package (all code lives here)
 │   ├── __init__.py
-│   ├── agents/               # 5 AI agents (to be built)
+│   ├── agents/               # 5 AI agents (Architect, Cost, Security, Compliance, Judge)
 │   ├── compliance/           # Compliance rules (to be built)
 │   ├── pricing/              # Pricing data (to be built)
 │   └── tests/                # Test suite (to be built)
@@ -193,4 +193,4 @@ See [`docs/BUILD_CHECKLIST.md`](./docs/BUILD_CHECKLIST.md) → Phase 10 for full
 
 ---
 
-*Phase 3 complete — ready to build Phase 4.*
+*Phase 5 complete — all five agents build structured, validated JSON. Ready for Phase 6 (orchestrator).*

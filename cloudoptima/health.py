@@ -189,7 +189,7 @@ def _check_memory() -> CheckResult:
     false-positive "healthy" when no data is available.
     """
     try:
-        import psutil  # type: ignore[import-untyped]
+        import psutil
         mem = psutil.virtual_memory()
         pct = mem.percent
         if pct < MEM_WARN_PCT:
@@ -235,7 +235,7 @@ def _check_llm_client_ping() -> CheckResult:
         from cloudoptima.config import Settings
         from cloudoptima.llm_client import create_llm_client
 
-        settings = Settings()  # type: ignore[call-arg]
+        settings = Settings()
         provider = settings.llm_provider
         client = create_llm_client(settings)
         if client is not None:

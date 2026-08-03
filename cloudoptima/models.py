@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 # ── Enumerations ─────────────────────────────────────────────────────────────
 
 
-class AgentType(str, Enum):
+class AgentType(StrEnum):
     """Supported agent roles within the multi-agent system."""
 
     ARCHITECT = "architect"
@@ -27,7 +27,7 @@ class AgentType(str, Enum):
     JUDGE = "judge"
 
 
-class WorkloadType(str, Enum):
+class WorkloadType(StrEnum):
     """Target workload characteristic profiles."""
 
     REALTIME = "realtime"
@@ -36,7 +36,7 @@ class WorkloadType(str, Enum):
     MIXED = "mixed"
 
 
-class DeploymentScale(str, Enum):
+class DeploymentScale(StrEnum):
     """Scale categories for target infrastructure."""
 
     SMALL = "small"
@@ -45,7 +45,7 @@ class DeploymentScale(str, Enum):
     ENTERPRISE = "enterprise"
 
 
-class AzureRegion(str, Enum):
+class AzureRegion(StrEnum):
     """Major Azure deployment regions."""
 
     UAE_NORTH = "uaenorth"
@@ -67,7 +67,7 @@ class AzureRegion(str, Enum):
     BRAZIL_SOUTH = "brazilsouth"
 
 
-class ComplianceFramework(str, Enum):
+class ComplianceFramework(StrEnum):
     """Supported regulatory and compliance frameworks."""
 
     PDPL = "pdpl"

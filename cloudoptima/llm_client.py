@@ -87,16 +87,16 @@ MOCK_RESPONSES: dict[str, dict[str, Any]] = {
         "estimate": 4250.00,
         "currency": "USD",
         "breakdown": [
-            {"service": "AKS", "monthly_cost": 1800.00, "notes": "3 nodes, D4s_v3"},
-            {"service": "Azure SQL", "monthly_cost": 920.00, "notes": "General Purpose, 8 vCores"},
-            {"service": "Blob Storage", "monthly_cost": 150.00, "notes": "Hot tier, 2TB"},
-            {"service": "Front Door", "monthly_cost": 380.00, "notes": "Standard tier"},
-            {"service": "Redis Cache", "monthly_cost": 450.00, "notes": "Premium P1"},
-            {"service": "Networking", "monthly_cost": 250.00, "notes": "VNet, NSGs, bandwidth"},
-            {"service": "Monitoring", "monthly_cost": 300.00, "notes": "Log Analytics, alerts"},
+            {"service": "AKS", "cost": 1800.00, "notes": "3 nodes, D4s_v3"},
+            {"service": "Azure SQL", "cost": 920.00, "notes": "General Purpose, 8 vCores"},
+            {"service": "Blob Storage", "cost": 150.00, "notes": "Hot tier, 2TB"},
+            {"service": "Front Door", "cost": 380.00, "notes": "Standard tier"},
+            {"service": "Redis Cache", "cost": 450.00, "notes": "Premium P1"},
+            {"service": "Networking", "cost": 250.00, "notes": "VNet, NSGs, bandwidth"},
+            {"service": "Monitoring", "cost": 300.00, "notes": "Log Analytics, alerts"},
         ],
         "budget_status": "UNDER",
-        "optimization_suggestions": [
+        "savings": [
             "Consider reserved instances for AKS nodes (up to 40% savings)",
             "Use Azure Hybrid Benefit if existing Windows Server licenses available",
             "Archive cold data to Cool or Archive tier storage",
@@ -146,25 +146,25 @@ MOCK_RESPONSES: dict[str, dict[str, Any]] = {
         "framework": "PDPL",
         "rules": [
             {
-                "rule_id": "PDPL-DR-01",
+                "rule_id": "01",
                 "rule_name": "Data Residency",
                 "status": "PASS",
                 "details": "All resources deployed in UAE North region",
             },
             {
-                "rule_id": "PDPL-ENC-01",
+                "rule_id": "02",
                 "rule_name": "Encryption at Rest",
                 "status": "PASS",
                 "details": "AES-256 encryption enabled across all storage services",
             },
             {
-                "rule_id": "PDPL-AC-01",
+                "rule_id": "04",
                 "rule_name": "Access Control",
                 "status": "PASS",
                 "details": "RBAC and MFA enforced via Azure AD",
             },
             {
-                "rule_id": "PDPL-AL-01",
+                "rule_id": "05",
                 "rule_name": "Audit Logging",
                 "status": "CONFIG_NEEDED",
                 "details": "Azure Monitor configured but log retention set to 30 days",
@@ -182,11 +182,13 @@ MOCK_RESPONSES: dict[str, dict[str, Any]] = {
             "conflict_summaries": [
                 {
                     "dimension": "cost_vs_security",
+                    "agents_involved": ["cost_analyst", "security"],
                     "issue": "Security recommends Azure Firewall ($1,200/mo) exceeding budget",
                     "resolution": "Use NSG rules with Azure DDoS Basic (free) as compromise",
                 },
                 {
                     "dimension": "architect_vs_compliance",
+                    "agents_involved": ["architect", "compliance"],
                     "issue": "Audit log retention set to 30 days, compliance requires 90 days",
                     "resolution": "Extend Log Analytics retention to 90 days (+$45/mo)",
                 },
@@ -199,18 +201,42 @@ MOCK_RESPONSES: dict[str, dict[str, Any]] = {
 }
 
 
-def _detect_agent_type(prompt: str) -> str:
-    """Detect which agent type a prompt is intended for based on keywords."""
-    prompt_lower = prompt.lower()
-    if "architect" in prompt_lower or "compute" in prompt_lower or "design" in prompt_lower:
+# Role markers that name the agent in its system prompt. More specific markers
+# come first, so "cost analyst" beats a bare "cost" mention in user text.
+_ROLE_MARKERS: tuple[tuple[str, str], ...] = (
+    ("cost analyst", "cost"),
+    ("security engineer", "security"),
+    ("compliance officer", "compliance"),
+    ("judge", "judge"),
+    ("architect", "architect"),
+)
+
+
+def _detect_agent_type(prompt: str, system_prompt: str = "") -> str:
+    """Detect which agent type a prompt is intended for.
+
+    The system prompt is authoritative because it names the role, so it is
+    checked first. This matters in the real pipeline: downstream agents carry
+    earlier outputs in their prompt (the architect's design mentions "compute"
+    and "design"), which would otherwise misroute the mock response. The
+    combined-text keyword scan remains as a fallback for callers that do not
+    pass a system prompt.
+    """
+    system_lower = system_prompt.lower()
+    for marker, agent_key in _ROLE_MARKERS:
+        if marker in system_lower:
+            return agent_key
+
+    combined = f"{system_prompt} {prompt}".lower()
+    if "architect" in combined or "compute" in combined or "design" in combined:
         return "architect"
-    if "cost" in prompt_lower or "budget" in prompt_lower or "estimate" in prompt_lower:
+    if "cost" in combined or "budget" in combined or "estimate" in combined:
         return "cost"
-    if "security" in prompt_lower or "vulnerability" in prompt_lower or "risk" in prompt_lower:
+    if "security" in combined or "vulnerability" in combined or "risk" in combined:
         return "security"
-    if "compliance" in prompt_lower or "regulation" in prompt_lower or "pdpl" in prompt_lower:
+    if "compliance" in combined or "regulation" in combined or "pdpl" in combined:
         return "compliance"
-    if "judge" in prompt_lower or "conflict" in prompt_lower or "arbitrat" in prompt_lower:
+    if "judge" in combined or "conflict" in combined or "arbitrat" in combined:
         return "judge"
     return "architect"
 
@@ -223,8 +249,7 @@ class MockClient(BaseLLMClient):
 
     def generate(self, prompt: str, system_prompt: str = "") -> str:
         """Return a canned JSON response based on detected agent type."""
-        combined = f"{system_prompt} {prompt}"
-        agent_key = _detect_agent_type(combined)
+        agent_key = _detect_agent_type(prompt, system_prompt)
         response = MOCK_RESPONSES.get(agent_key, MOCK_RESPONSES["architect"])
         time.sleep(0.05)  # Simulate minimal latency
         return json.dumps(response)
