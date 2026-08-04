@@ -234,8 +234,14 @@ def _check_llm_client_ping() -> CheckResult:
     try:
         from cloudoptima.config import Settings
         from cloudoptima.llm_client import create_llm_client
+        from cloudoptima.llm_routing import create_routed_client
 
         settings = Settings()
+        if settings.routing_enabled:
+            routed = create_routed_client(settings)
+            providers = ", ".join(sorted(set(routed.chosen_providers())))
+            return True, f"Routed LLM client ready — providers: {providers}"
+
         provider = settings.llm_provider
         client = create_llm_client(settings)
         if client is not None:

@@ -849,12 +849,15 @@ def test_prior_turn_markers_are_stripped() -> None:
 def test_judge_prompt_includes_all_four_outputs_and_conflicts() -> None:
     """The judge sees every agent's output and the detected conflicts."""
     session = _make_session()
-    for agent_cls, agent_type in [
+    # type[Any] keeps mypy happy: the four classes are distinct concrete
+    # subclasses, and a plain type[BaseAgent] join would be flagged as abstract.
+    agent_cases: list[tuple[type[Any], AgentType]] = [
         (ArchitectAgent, AgentType.ARCHITECT),
         (CostAnalystAgent, AgentType.COST_ANALYST),
         (SecurityEngineerAgent, AgentType.SECURITY),
         (ComplianceOfficerAgent, AgentType.COMPLIANCE),
-    ]:
+    ]
+    for agent_cls, agent_type in agent_cases:
         turn = _make_agent(agent_cls, agent_type).analyze(session)
         session.agent_turns.append(turn)
     session.conflicts.append(

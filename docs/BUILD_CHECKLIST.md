@@ -300,56 +300,66 @@ Each phase has tasks with `[ ]` checkboxes. Mark `[x]` when done. Don't skip pha
 
 ---
 
-## Phase 7: Streamlit Dashboard (Day 7-9)
+## Phase 7: Streamlit Dashboard (Day 7-9) ✅ COMPLETE
 
 > **Goal:** Simple, clean UI. Form → progress → results.
 
 ### 7.1 — Dashboard (`cloudoptima/dashboard.py`)
 
 **Sidebar:**
-- [ ] App name + description
-- [ ] Demo mode toggle (mock data = fast)
-- [ ] Past sessions list
-- [ ] System status (version + uptime)
+- [x] App name + description
+- [x] Demo mode toggle (mock data = fast)
+- [x] Past sessions list
+- [x] System status (version + uptime)
 
 **Input Form:**
-- [ ] Project name (text input)
-- [ ] Workload type (dropdown: realtime/batch/streaming/mixed)
-- [ ] Azure region (dropdown with all regions)
-- [ ] Compliance framework (dropdown)
-- [ ] Deployment scale (dropdown with user count ranges)
-- [ ] Monthly budget (number input, $100–$100,000)
-- [ ] Services & context (text area with placeholder examples)
-- [ ] "Analyze" button
+- [x] Project name (text input)
+- [x] Workload type (dropdown: realtime/batch/streaming/mixed)
+- [x] Azure region (dropdown with all regions)
+- [x] Compliance framework (dropdown)
+- [x] Deployment scale (dropdown with user count ranges)
+- [x] Monthly budget (number input, $100–$100,000)
+- [x] Services & context (text area with placeholder examples)
+- [x] "Analyze" button
 
 **Progress View:**
-- [ ] Status box with real-time agent progress
-- [ ] Progress bar — DON'T fake it. Only update when orchestrator actually finishes a step
+- [x] Status box with real-time agent progress
+- [x] Progress bar — DON'T fake it. Only update when orchestrator actually finishes a step
 
 **Results (4 tabs):**
-- **Overview:** Total time, conflicts count, artifacts count, status badge. Latency bar chart. Judge summary.
-- **Agents:** Expandable cards per agent — latency, tokens, structured output. "Show raw JSON" toggle.
-- **Conflicts:** Cards per pair (Architect vs Cost, etc.). Severity color: RED=high, YELLOW=medium, GREEN=resolved.
-- **Artifacts:** 4 cards with download buttons. Syntax-highlighted IaC preview.
+- [x] **Overview:** Total time, conflicts count, artifacts count, status badge. Latency bar chart. Judge summary.
+- [x] **Agents:** Expandable cards per agent — latency, tokens, structured output. "Show raw JSON" toggle.
+- [x] **Conflicts:** Cards per pair (Architect vs Cost, etc.). Severity color: RED=high, YELLOW=medium, GREEN=resolved.
+- [x] **Artifacts:** 4 cards with download buttons. Syntax-highlighted IaC preview.
 
 **State Management:**
-- [ ] `st.session_state.orchestrator` — persists across page reruns
-- [ ] `st.session_state.current_session` — current results
-- [ ] `st.session_state.session_history` — old sessions
-- [ ] `st.session_state.running` — prevents double-click
+- [x] `st.session_state.orchestrator` — persists across page reruns
+- [x] `st.session_state.current_session` — current results
+- [x] `st.session_state.session_history` — old sessions
+- [x] `st.session_state.running` — prevents double-click
 
 **Security:**
-- [ ] ALL user input cleaned with `clean_input()` before analysis
-- [ ] ALL LLM output cleaned with `clean_output()` before showing
-- [ ] NEVER use `unsafe_allow_html=True` anywhere
+- [x] ALL user input cleaned with `clean_input()` before analysis
+- [x] ALL LLM output cleaned with `clean_output()` before showing
+- [x] NEVER use `unsafe_allow_html=True` anywhere
 
 ### 7.2 — Test Dashboard
-- [ ] Form submission creates valid Session
-- [ ] Progress updates during analysis
-- [ ] Download buttons produce valid content
-- [ ] Session history persists
-- [ ] XSS in project name → escaped, not executed
-- [ ] HTML in LLM output → shown as text, not rendered
+- [x] Form submission creates valid Session
+- [x] Progress updates during analysis
+- [x] Download buttons produce valid content
+- [x] Session history persists
+- [x] XSS in project name → escaped, not executed
+- [x] HTML in LLM output → shown as text, not rendered
+
+> **Phase 7 complete.** `cloudoptima/dashboard.py` runs the five-agent pipeline
+> in a background thread while the main thread polls `session.agent_turns`, so
+> the progress bar only advances when a turn actually completes (never faked).
+> All form input goes through `clean_input()`; all LLM output through
+> `clean_output()`; no `unsafe_allow_html` anywhere. Tests in
+> `cloudoptima/tests/test_dashboard.py` (unit tests for the pure helpers plus
+> Streamlit `AppTest` integration covering the full flow, XSS escaping, and
+> the 4 download artifacts).
+
 
 ---
 
@@ -591,10 +601,31 @@ Each phase has tasks with `[ ]` checkboxes. Mark `[x]` when done. Don't skip pha
 | **Nvidia NIM** | Free | Fast (2-5s) | Supported | Testing |
 | **Azure OpenAI** | Pay per token | Medium (5-15s) | `json_object` | Production |
 
+## Phase 7.5: Cost-Aware LLM Routing ✅ COMPLETE
+
+> **Goal:** Production-grade provider selection — cheapest first, automatic
+> failover, spend guard and tracking (`cloudoptima/llm_routing.py`).
+
+- [x] Per-model price table (Nvidia free tier $0, Azure pay-as-you-go)
+- [x] Price-ordered provider selection (cheapest with credentials first)
+- [x] Automatic failover when a provider errors or is rate-limited
+- [x] Health demotion — repeated failures deprioritise a provider until it recovers
+- [x] Quality tiers: Architect/Judge → `smart` model; others → `fast` model
+- [x] Spend guard: skip providers whose estimated input cost exceeds the cap
+- [x] Per-provider spend tracking via `router.stats()`
+- [x] Mock safety net when no real provider has credentials
+- [x] Wired into `Orchestrator.from_settings` and the health checks
+- [x] Tests in `cloudoptima/tests/test_llm_routing.py`
+
+> **Phase 7.5 complete.** Router picks the cheapest healthy provider per call
+> (free Nvidia NIM first), fails over on errors/429s, tiers models by agent
+> (smart: `meta/llama-3.3-70b-instruct`, fast: `meta/llama-3.1-8b-instruct`),
+> guards spend, and tracks per-provider USD usage.
+
 ---
 
-> **Updated:** July 2026
+> **Updated:** August 2026
 
 > **Phase 4 complete.** `BaseAgent` template method with prompt hardening, injection audit trail, caching, and graceful error turns. 11 tests in `cloudoptima/tests/test_agent_base.py`.
 
-> **Phases 0-5 + 9 complete — ready for Phase 6 (orchestrator).**
+> **Phases 0-7 + 9 complete — ready for Phase 8 (compliance rules & pricing).**

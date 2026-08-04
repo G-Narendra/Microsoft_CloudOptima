@@ -23,7 +23,7 @@ Microsoft_CloudOptima is a multi-agent AI system that helps you design cloud arc
 
 ---
 
-## 🚧 Current Status — Phase 5 Complete
+## 🚧 Current Status — Phase 7 Complete
 
 | Phase | Status |
 |-------|--------|
@@ -34,9 +34,9 @@ Microsoft_CloudOptima is a multi-agent AI system that helps you design cloud arc
 | Phase 4 — Base Agent Class | ✅ **Done** (BaseAgent template method, prompt hardening, caching, error turns) |
 | Phase 5 — All 5 Agents | ✅ **Done** (Architect, Cost, Security, Compliance with 21 hardcoded rules, Judge) |
 | Phase 6 — Orchestrator | ✅ **Done** (5-agent pipeline, 6-pair conflict detection, judge arbitration, 4 artifacts, IaC malware scan, CLI) |
-| Phase 7 — Streamlit Dashboard | 📅 Planned |
+| Phase 7 — Streamlit Dashboard | ✅ **Done** (input form, real progress bar, 4 result tabs, artifact downloads, session history, demo toggle) |
 | Phase 9 — Logging & Health Checks | ✅ **Done** (audit logging, @trace, health registry) |
-| Phases 8, 10–14 | 📅 Planned |
+| Phase 8, 10–14 | 📅 Planned |
 
 📋 **Full build checklist:** See [`docs/BUILD_CHECKLIST.md`](./docs/BUILD_CHECKLIST.md)
 
@@ -151,6 +151,24 @@ User describes infrastructure needs
 | Container | Docker | Consistent dev-to-prod |
 | Cloud | Azure App Service | Student credits, free tier available |
 
+### 💰 Cost-Aware LLM Routing (production)
+
+Instead of pinning the app to one provider, set `ROUTING_ENABLED=true` and each
+agent call is routed to the **cheapest enabled provider with credentials**, with
+automatic failover:
+
+- **Cheapest first** — Nvidia NIM's free tier ($0) is tried before paid Azure
+- **Rate-limit-aware failover** — a provider that keeps failing (e.g. free-tier
+  HTTP 429s) is demoted until it recovers, shifting load to the next provider
+- **Quality tiers** — Architect & Judge run the `smart` model, the other
+  specialists the cheaper `fast` model
+- **Spend guard** — requests whose estimated input cost exceed
+  `ROUTING_MAX_COST_PER_REQUEST` skip that provider
+- **Spend tracking** — per-provider USD spend via the router's `stats()`
+
+Default models: Nvidia NIM (free) `meta/llama-3.3-70b-instruct` smart /
+`meta/llama-3.1-8b-instruct` fast; Azure OpenAI `gpt-4o-mini` for both tiers.
+
 ---
 
 ## Project Structure
@@ -193,4 +211,4 @@ See [`docs/BUILD_CHECKLIST.md`](./docs/BUILD_CHECKLIST.md) → Phase 10 for full
 
 ---
 
-*Phase 6 complete — orchestrator runs the full 5-agent pipeline, detects conflicts, generates 4 artifacts, and never crashes. Ready for Phase 7 (dashboard).*
+*Phase 7 complete — the Streamlit dashboard runs the full 5-agent pipeline with live progress, 4 result tabs, downloadable artifacts, and session history. Ready for Phase 8 (compliance rules + pricing).*

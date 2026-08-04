@@ -24,7 +24,9 @@ def _now() -> datetime.datetime:
     return datetime.datetime.now(datetime.UTC)
 
 
-def _entry(passed: bool, detail: str = "") -> dict[str, object]:
+def _entry(
+    passed: bool, detail: str = ""
+) -> dict[str, str | bool | float | datetime.datetime | None]:
     """Build a single HealthEntry-shaped result dict."""
     return {"passed": passed, "detail": detail, "timestamp": _now()}
 
@@ -93,7 +95,8 @@ def test_check_all_never_crashes_on_throwing_check() -> None:
     try:
         results = check_all(include=["test_throwing_check"])
         assert results["test_throwing_check"]["passed"] is False
-        assert "RuntimeError" in results["test_throwing_check"]["detail"]
+        detail = results["test_throwing_check"]["detail"]
+        assert isinstance(detail, str) and "RuntimeError" in detail
     finally:
         unregister("test_throwing_check")
 

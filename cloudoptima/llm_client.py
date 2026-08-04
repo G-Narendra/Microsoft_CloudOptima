@@ -267,11 +267,13 @@ class NvidiaClient(BaseLLMClient):
 
     BASE_URL = "https://integrate.api.nvidia.com/v1"
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self, settings: Settings, model: str | None = None, timeout: float | None = None
+    ) -> None:
         self._api_key = settings.nvidia_api_key.get_secret_value()
-        self._model = settings.llm_model
+        self._model = model or settings.llm_model
         self._temperature = settings.llm_temperature
-        self._timeout = settings.llm_timeout
+        self._timeout = timeout if timeout is not None else settings.llm_timeout
 
         if not self._api_key:
             raise ValueError(
@@ -323,7 +325,9 @@ class AzureClient(BaseLLMClient):
     Supports JSON mode via response_format parameter.
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self, settings: Settings, model: str | None = None, timeout: float | None = None
+    ) -> None:
         api_key = settings.azure_openai_api_key.get_secret_value()
         if not api_key:
             raise ValueError(
@@ -341,9 +345,9 @@ class AzureClient(BaseLLMClient):
             api_version=settings.azure_openai_api_version,
             azure_endpoint=settings.azure_openai_endpoint,
         )
-        self._model = settings.llm_model
+        self._model = model or settings.llm_model
         self._temperature = settings.llm_temperature
-        self._timeout = settings.llm_timeout
+        self._timeout = timeout if timeout is not None else settings.llm_timeout
 
     def generate(self, prompt: str, system_prompt: str = "") -> str:
         """Send a chat completion request to Azure OpenAI with JSON mode."""

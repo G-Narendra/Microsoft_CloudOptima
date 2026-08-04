@@ -6,8 +6,10 @@ and .env files with security redaction for sensitive fields.
 
 from __future__ import annotations
 
+from typing import Annotated
+
 from pydantic import Field, SecretStr, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -46,6 +48,41 @@ class Settings(BaseSettings):
     )
     llm_timeout: int = Field(
         default=30, description="Model request timeout in seconds"
+    )
+
+    # ── Cost-aware LLM routing (Phase 7.5) ────────────────────────
+    routing_enabled: bool = Field(
+        default=False,
+        description="Route calls across providers cheapest-first with failover",
+    )
+    # NoDecode: the env var form is a plain comma string ("nvidia,azure"),
+    # which pydantic-settings would otherwise try to JSON-decode and fail on.
+    routing_providers: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["nvidia", "azure"],
+        description="Providers eligible for routing (mock, nvidia, azure)",
+    )
+    routing_max_cost_per_request: float = Field(
+        default=0.005,
+        description="Soft USD cap on estimated input cost before a provider is skipped",
+    )
+    routing_timeout: float = Field(
+        default=10.0,
+        gt=0.0,
+        description="Per-provider timeout in seconds for routed clients (fail fast)",
+    )
+    llm_nvidia_model: str = Field(
+        default="meta/llama-3.3-70b-instruct",
+        description="Nvidia NIM smart-tier model (Architect, Judge)",
+    )
+    llm_nvidia_fast_model: str = Field(
+        default="meta/llama-3.1-8b-instruct",
+        description="Nvidia NIM fast-tier model (Cost, Security, Compliance)",
+    )
+    llm_azure_model: str = Field(
+        default="gpt-4o-mini", description="Azure OpenAI smart-tier model"
+    )
+    llm_azure_fast_model: str = Field(
+        default="gpt-4o-mini", description="Azure OpenAI fast-tier model"
     )
 
     # ── Debug & Operational Toggles ──────────────────
@@ -130,6 +167,25 @@ class Settings(BaseSettings):
         if v.lower() not in allowed:
             raise ValueError(f"llm_provider must be one of {allowed}, got '{v}'")
         return v.lower()
+
+    @field_validator("routing_providers", mode="before")
+    @classmethod
+    def parse_routing_providers(cls, v: object) -> object:
+        """Accept a comma-separated env string ("nvidia,azure") or a list."""
+        if isinstance(v, str):
+            return [item.strip() for item in v.split(",") if item.strip()]
+        return v
+
+    @field_validator("routing_providers")
+    @classmethod
+    def validate_routing_providers(cls, v: list[str]) -> list[str]:
+        """Ensure every routing provider is one of the supported values."""
+        allowed = {"mock", "nvidia", "azure"}
+        cleaned = [p.lower() for p in v]
+        unknown = [p for p in cleaned if p not in allowed]
+        if unknown:
+            raise ValueError(f"routing_providers contains unknown provider(s): {unknown}")
+        return cleaned
 
     def get_sensitive_fields(self) -> dict[str, str]:
         """Return dict of sensitive key names mapped to redacted string placeholders."""

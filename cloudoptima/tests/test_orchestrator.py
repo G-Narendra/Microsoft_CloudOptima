@@ -12,6 +12,8 @@ import io
 import json
 from typing import Any
 
+import pytest
+
 from cloudoptima import app
 from cloudoptima.agent_base import BaseAgent
 from cloudoptima.agents import ALL_AGENTS
@@ -257,7 +259,9 @@ def test_unexpected_agent_exception_marks_session_failed() -> None:
 
 def test_missing_agent_role_rejected() -> None:
     """An orchestrator missing an agent role is rejected at construction."""
-    agents = {AgentType.ARCHITECT: ArchitectAgent(AgentType.ARCHITECT, MockClient(), Settings())}
+    agents: dict[AgentType, BaseAgent] = {
+        AgentType.ARCHITECT: ArchitectAgent(AgentType.ARCHITECT, MockClient(), Settings())
+    }
     try:
         Orchestrator(agents=agents, config=Settings())
     except ValueError as exc:
@@ -289,7 +293,9 @@ def test_create_orchestrator_returns_ready_orchestrator() -> None:
     assert len(session.artifacts) == 4
 
 
-def test_cli_main_runs_pipeline_from_stdin(monkeypatch, capsys) -> None:
+def test_cli_main_runs_pipeline_from_stdin(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     """A valid session JSON on stdin produces the completed session on stdout."""
     payload = json.dumps(
         {"project_name": "CLI App", "user_prompt": "Design a batch pipeline"}
@@ -306,7 +312,9 @@ def test_cli_main_runs_pipeline_from_stdin(monkeypatch, capsys) -> None:
     assert captured.err == ""
 
 
-def test_cli_main_rejects_invalid_json(monkeypatch, capsys) -> None:
+def test_cli_main_rejects_invalid_json(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     """Malformed JSON on stdin exits with code 2 and a message."""
     monkeypatch.setattr("sys.stdin", io.StringIO("{not json"))
 
@@ -317,7 +325,9 @@ def test_cli_main_rejects_invalid_json(monkeypatch, capsys) -> None:
     assert "not valid JSON" in captured.err
 
 
-def test_cli_main_rejects_missing_required_field(monkeypatch, capsys) -> None:
+def test_cli_main_rejects_missing_required_field(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     """A session without project_name fails validation with exit code 2."""
     monkeypatch.setattr("sys.stdin", io.StringIO('{"user_prompt": "hi"}'))
 

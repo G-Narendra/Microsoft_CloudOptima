@@ -42,6 +42,7 @@ from cloudoptima.agent_base import BaseAgent
 from cloudoptima.agents import ALL_AGENTS
 from cloudoptima.config import Settings
 from cloudoptima.llm_client import create_llm_client
+from cloudoptima.llm_routing import create_routed_client
 from cloudoptima.models import AgentTurn, AgentType, Artifact, Conflict, Session
 from cloudoptima.observability import TraceEvent, get_audit_logger
 from cloudoptima.sanitize import clean_output, scan_for_malware_in_iac
@@ -160,7 +161,11 @@ class Orchestrator:
         Returns:
             A ready-to-run :class:`Orchestrator`.
         """
-        llm_client = create_llm_client(settings)
+        llm_client = (
+            create_routed_client(settings)
+            if settings.routing_enabled
+            else create_llm_client(settings)
+        )
         agents: dict[AgentType, BaseAgent] = {
             agent_type: agent_cls(agent_type, llm_client, settings)
             for agent_type, agent_cls in zip(_PIPELINE_TYPES, ALL_AGENTS, strict=True)

@@ -13,7 +13,6 @@ import threading
 import pytest
 from pydantic import ValidationError
 
-from cloudoptima import sanitize
 from cloudoptima.models import Session
 from cloudoptima.sanitize import (
     DEFAULT_MAX_LENGTH,
@@ -243,7 +242,9 @@ def test_rate_limit_window_expires(monkeypatch: pytest.MonkeyPatch) -> None:
     """Quota frees up once the window slides past. Uses a fake clock so the
     test is deterministic rather than dependent on sleep granularity."""
     now = [1000.0]
-    monkeypatch.setattr(sanitize.time, "monotonic", lambda: now[0])
+    # Patch the shared time module via its dotted path: mypy cannot see
+    # ``sanitize.time`` because it is not part of sanitize's public __all__.
+    monkeypatch.setattr("time.monotonic", lambda: now[0])
 
     assert rate_limit("expiring", max_calls=1, window_sec=60) is True
     assert rate_limit("expiring", max_calls=1, window_sec=60) is False
@@ -473,4 +474,6 @@ def test_compile_blocked_patterns_categories() -> None:
 
 def test_session_rejects_unknown_fields() -> None:
     with pytest.raises(ValidationError):
-        Session(project_name="x", mystery_field="boom")
+        # model_validate keeps mypy happy: the unknown key is only visible to
+        # pydantic's extra="forbid" at runtime.
+        Session.model_validate({"project_name": "x", "mystery_field": "boom"})

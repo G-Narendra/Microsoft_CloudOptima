@@ -9,6 +9,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import pytest
+
 from cloudoptima.agent_base import _DELIMITER_MARKER, INJECTION_GUARD, BaseAgent
 from cloudoptima.config import Settings
 from cloudoptima.llm_client import BaseLLMClient, MockClient
@@ -181,7 +183,9 @@ def test_injection_in_user_fields_is_detected() -> None:
     assert isinstance(turn, AgentTurn)
 
 
-def test_injection_through_analyze_logs_warning(caplog) -> None:
+def test_injection_through_analyze_logs_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Real injection text must produce the audit warning via analyze()."""
     agent = _PassAgent(AgentType.ARCHITECT, MockClient(), Settings())
     session = _make_session(
@@ -215,7 +219,9 @@ def test_delimiters_reach_the_llm() -> None:
     assert "--- END ---" in prompt
 
 
-def test_benign_prompt_not_flagged_as_injection(caplog) -> None:
+def test_benign_prompt_not_flagged_as_injection(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """A normal session must not trigger the injection warning.
 
     Regression: the wrapper's own '--- END ---' marker matches the scanner's

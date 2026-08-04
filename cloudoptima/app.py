@@ -58,6 +58,8 @@ def main(argv: list[str] | None = None) -> int:
     """
     del argv
 
+    _configure_utf8_stdio()
+
     payload = _read_stdin_payload()
     if payload is None:
         print(CLI_USAGE, file=sys.stderr)
@@ -80,6 +82,25 @@ def main(argv: list[str] | None = None) -> int:
 
     print(result.model_dump_json(indent=2))
     return 0
+
+
+def _configure_utf8_stdio() -> None:
+    """Reconfigure stdout/stderr to UTF-8 so Unicode output never crashes.
+
+    On Windows the console defaults to cp1252, and generated artifacts contain
+    characters outside that codec (e.g. the ``──`` separators in the Bicep
+    template), which made ``print()`` raise ``UnicodeEncodeError`` after the
+    pipeline had already succeeded. Best-effort: on platforms where
+    ``reconfigure`` is unavailable this is a no-op.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
 
 
 def _read_stdin_payload() -> dict[str, Any] | None:
