@@ -34,6 +34,7 @@ from cloudoptima.models import (
     Session,
     WorkloadType,
 )
+from cloudoptima.orchestrator import Orchestrator
 
 __version__ = "0.1.0"
 
@@ -44,6 +45,7 @@ __all__ = [
     "create_llm_client",
     "generate_with_retry",
     "LLMCache",
+    "Orchestrator",
     "AgentTurn",
     "AgentType",
     "Artifact",

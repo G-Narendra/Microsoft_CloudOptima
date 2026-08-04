@@ -49,8 +49,14 @@ class CostAnalystAgent(BaseAgent):
             [
                 self._wrap_field("PROJECT NAME", session.project_name),
                 self._wrap_field("MONTHLY BUDGET (READ-ONLY REFERENCE)", budget),
-                self._wrap_field("DEPLOYMENT SCALE", session.scale.value),
-                self._wrap_field("AZURE REGION", session.region.value),
+                self._wrap_field(
+                    "DEPLOYMENT SCALE",
+                    getattr(session.scale, "value", session.scale),
+                ),
+                self._wrap_field(
+                    "AZURE REGION",
+                    getattr(session.region, "value", session.region),
+                ),
                 self._wrap_field("REQUIRED SERVICES", session.services),
                 self._wrap_field("REQUIREMENTS", session.user_prompt),
                 "ARCHITECT DESIGN (trusted pipeline output):",

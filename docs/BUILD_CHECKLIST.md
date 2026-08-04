@@ -254,13 +254,13 @@ Each phase has tasks with `[ ]` checkboxes. Mark `[x]` when done. Don't skip pha
 
 ---
 
-## Phase 6: Orchestrator (Day 6-7)
+## Phase 6: Orchestrator (Day 6-7) ✅ COMPLETE
 
 > **Goal:** Run all 5 agents → detect conflicts → Judge resolves → generate final artifacts.
 
 ### 6.1 — Orchestrator (`cloudoptima/orchestrator.py`)
-- [ ] Takes list of agents + config
-- [ ] `run(session)` does:
+- [x] Takes list of agents + config
+- [x] `run(session)` does:
   1. Run agents in order: Architect → Cost → Security → Compliance (record timing)
   2. Compare all agent outputs to find disagreements (6 pair combinations)
   3. Run Judge with all outputs + conflicts
@@ -275,19 +275,28 @@ Each phase has tasks with `[ ]` checkboxes. Mark `[x]` when done. Don't skip pha
 - Cost vs Compliance → can we afford compliance?
 - Security vs Compliance → do security and compliance agree?
 
-- [ ] **Security:** If any agent output is broken, orchestrator catches it and logs a failed turn. Never crashes.
+- [x] **Security:** If any agent output is broken, orchestrator catches it and logs a failed turn. Never crashes.
 
 ### 6.2 — App Entry Point (`cloudoptima/app.py`)
-- [ ] `create_orchestrator(settings)` — wires everything together
-- [ ] `main()` for CLI testing (input JSON → output JSON)
-- [ ] **Security:** Never print API keys in debug output
+- [x] `create_orchestrator(settings)` — wires everything together
+- [x] `main()` for CLI testing (input JSON → output JSON)
+- [x] **Security:** Never print API keys in debug output
 
 ### 6.3 — Test Orchestrator
-- [ ] Full pipeline completes without errors
-- [ ] At least 1 conflict found with mock data
-- [ ] 4 artifacts generated
-- [ ] Broken agent output doesn't crash pipeline
-- [ ] Same session run twice = same conflict count
+- [x] Full pipeline completes without errors
+- [x] At least 1 conflict found with mock data
+- [x] 4 artifacts generated
+- [x] Broken agent output doesn't crash pipeline
+- [x] Same session run twice = same conflict count
+
+> **Phase 6 complete.** `cloudoptima/orchestrator.py` runs the full 5-agent
+> pipeline with conflict detection across all 6 pairs, judge resolution
+> folding, and 4 malware-scanned artifacts. `cloudoptima/app.py` provides
+> `create_orchestrator()` and a stdin→stdout CLI. 18 tests in
+> `cloudoptima/tests/test_orchestrator.py`. Also fixed a latent bug where
+> `validate_assignment=True` + `use_enum_values=True` caused scalar enum
+> fields to serialize to plain strings on any field write, breaking all
+> agent prompt builders that called `.value` on session enums.
 
 ---
 

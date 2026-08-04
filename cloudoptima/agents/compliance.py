@@ -114,7 +114,7 @@ class ComplianceOfficerAgent(BaseAgent):
         return "\n".join(
             [
                 self._wrap_field("PROJECT NAME", session.project_name),
-                self._wrap_field("AZURE REGION", session.region.value),
+                self._wrap_field("AZURE REGION", getattr(session.region, "value", session.region)),
                 self._wrap_field("COMPLIANCE FRAMEWORKS", frameworks),
                 self._wrap_field("REQUIREMENTS", session.user_prompt),
                 "ARCHITECT DESIGN (trusted pipeline output):",
