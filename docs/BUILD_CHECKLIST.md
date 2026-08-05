@@ -622,10 +622,51 @@ Each phase has tasks with `[ ]` checkboxes. Mark `[x]` when done. Don't skip pha
 > (smart: `meta/llama-3.3-70b-instruct`, fast: `meta/llama-3.1-8b-instruct`),
 > guards spend, and tracks per-provider USD usage.
 
+## Phase 7.6: Multi-Provider Expansion (PLANNED)
+
+> **Goal:** Put every major LLM provider behind the Phase 7.5 router — not just
+> Nvidia NIM and Azure OpenAI. The router is already provider-agnostic; each new
+> provider is a client class + a price-table row + a registry entry.
+
+- [ ] **OpenAI (direct)** client — `gpt-4o` / `gpt-4o-mini`, `json_object` mode
+- [ ] **Anthropic Claude** client — `claude-sonnet-4-20250514`, JSON-capable
+- [ ] **Google Gemini** client — `gemini-2.0-flash`, JSON mode
+- [ ] Price-table rows for every provider (real USD per 1M tokens)
+- [ ] Provider registry: `ROUTING_PROVIDERS=openai,azure,anthropic,google,nvidia`
+- [ ] Smart/fast quality-tier mapping per provider
+- [ ] Failover test across 4+ providers (kill one, load shifts to next cheapest)
+- [ ] Spend-guard test with real prices (free tier first, paid only when needed)
+
+---
+
+## Phase 15: Persistence & Auth — Production Data Layer (PLANNED)
+
+> **Goal:** Close the last gaps between “demo” and “production” — sessions survive
+> restarts, and the dashboard is protected. Blocks are independent; do 15.1 and
+> 15.2 before any public deployment.
+
+### 15.1 — Persistent Session Store
+- [ ] SQLite (built-in) for local dev — zero config
+- [ ] Session history reads from DB, not `st.session_state`
+- [ ] Swap to Azure Database for PostgreSQL / Cosmos DB via env var
+- [ ] Artifacts stored as blobs (Azure Blob Storage in prod)
+- [ ] **Security:** DB credentials from Azure Key Vault, never `.env` in prod
+
+### 15.2 — Authentication
+- [ ] Azure AD B2C login (best for Microsoft context) or simple user table
+- [ ] Login required before dashboard renders
+- [ ] Sessions scoped per user
+- [ ] **Security:** passwords hashed (argon2/bcrypt), never logged
+
+### 15.3 — (Optional) Async Job Queue
+- [ ] Azure Queue / Durable Functions for long analyses
+- [ ] Dashboard shows job status and fetches results when done
+
 ---
 
 > **Updated:** August 2026
 
 > **Phase 4 complete.** `BaseAgent` template method with prompt hardening, injection audit trail, caching, and graceful error turns. 11 tests in `cloudoptima/tests/test_agent_base.py`.
 
-> **Phases 0-7 + 9 complete — ready for Phase 8 (compliance rules & pricing).**
+> **Phases 0–7, 7.5, 9 complete — ready for Phase 8 (compliance rules & pricing).**
+> **Planned next: Phase 7.6 (multi-provider expansion) and Phase 15 (persistence & auth).**

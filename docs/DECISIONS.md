@@ -16,3 +16,5 @@
 | Aug 2026 | Dashboard runs the pipeline in a background thread and polls `agent_turns` | Real progress bar — advances only when a turn actually finishes, never faked | Phase 7 |
 | Aug 2026 | CLI reconfigures stdout to UTF-8 | Windows cp1252 consoles crashed printing Unicode artifact content | Phase 6 fix |
 | Aug 2026 | Cost-aware LLM routing (Phase 7.5) | Production cost optimization — cheapest healthy provider first, failover on 429s, tiered models, spend guard + tracking | Narendra |
+| Aug 2026 | Multi-provider expansion planned (Phase 7.6) | Router is provider-agnostic; add OpenAI direct, Anthropic, Google Gemini as drop-in clients with price-tiered routing — never vendor-locked to Nvidia | Narendra |
+| Aug 2026 | Persistence + auth planned (Phase 15) | Sessions must survive restarts (DB) and the dashboard must require login before public deployment | Narendra |
