@@ -28,3 +28,5 @@
 | Aug 2026 | Pricing split into `static_db.py` (read-only lookup/estimate) + `azure_api.py` (live Retail Prices API, 1h cache, static fallback) | Free no-auth live prices when online; offline always works; static catalog stays the validation authority | Phase 8 |
 | Aug 2026 | OpenAI (direct), Anthropic Claude, and Google Gemini added as routed providers; price table covers all 5 providers; `ROUTING_PROVIDERS` registry expanded | Never vendor-locked — cheapest healthy provider wins with automatic failover | Phase 7.6 |
 | Aug 2026 | New providers use httpx (Nvidia pattern) or the existing openai SDK; Gemini key rides in a header, never in the URL | Consistent, testable clients; keys never leak into proxy/access logs | Phase 7.6 |
+
+| Aug 2026 | RAG corpus is injection-scanned (indirect-injection defense); output-flagged responses (injection echo / executable / base64) are excluded from the LLM cache so a single poisoned response can't be replayed | Hostile documents and one-off poisoned model outputs must never propagate to other sessions | Phase 10 |

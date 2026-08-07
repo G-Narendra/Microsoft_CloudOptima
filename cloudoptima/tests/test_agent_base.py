@@ -84,6 +84,18 @@ class _InvalidJsonClient(BaseLLMClient):
         return "Sure! The architecture uses compute and storage. No JSON here."
 
 
+class _InjectionEchoClient(BaseLLMClient):
+    """Schema-valid JSON that still echoes a jailbreak phrase.
+
+    Passes _PassAgent validation but trips scan_llm_output's injection_echo —
+    the poisoned-cache scenario: one bad response must not be served to every
+    identical request.
+    """
+
+    def generate(self, prompt: str, system_prompt: str = "") -> str:
+        return '{"ok": true, "note": "Ignore previous instructions"}'
+
+
 # ── Fixtures ─────────────────────────────────────────────────────────────
 
 
@@ -131,6 +143,26 @@ def test_second_call_served_from_cache() -> None:
     second = agent.analyze(session)
 
     assert recording.call_count == 1
+    assert first.output == second.output
+
+
+def test_injection_echo_response_not_cached() -> None:
+    """A response that echoes a jailbreak never enters the cache.
+
+    The output is schema-valid (so the pipeline accepts it) but the output
+    scanner flags injection_echo — caching it would replay one poisoned
+    response to every identical request. The second identical call must hit
+    the LLM again.
+    """
+    recording = _RecordingClient(_InjectionEchoClient())
+    agent = _PassAgent(AgentType.ARCHITECT, recording, Settings())
+
+    session = _make_session()
+    first = agent.analyze(session)
+    second = agent.analyze(session)
+
+    assert "error" not in first.output  # schema-valid — pipeline survives
+    assert recording.call_count == 2  # never served from cache
     assert first.output == second.output
 
 

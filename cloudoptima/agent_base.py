@@ -185,7 +185,7 @@ class BaseAgent(ABC):
         # scanning, and response-length/token anomaly detection (all advisory —
         # schema validation below is the enforcement gate).
         tokens_used = getattr(self.llm_client, "last_tokens_used", 0) or 0
-        self._scan_output(session, raw, tokens_used)
+        flags = self._scan_output(session, raw, tokens_used)
 
         cleaned = clean_output(raw)
 
@@ -193,7 +193,11 @@ class BaseAgent(ABC):
         turn = self._build_turn(cleaned, latency, tokens_used)
 
         # Never cache error turns — replaying a failure is worse than a miss.
-        if "error" not in turn.output:
+        # And never cache a response that tripped the output scanner: a model
+        # echoing an injected payload or leaking an executable pattern is one
+        # bad response, but cached it would be served to every identical
+        # request. Flagged responses fail the cache, not the pipeline.
+        if "error" not in turn.output and not flags:
             self._cache.put(prompt, guarded_prompt, model, temperature, cleaned)
         return turn
 
@@ -365,43 +369,51 @@ class BaseAgent(ABC):
         )
         get_audit_logger().log(event)
 
-    def _scan_output(self, session: Session, raw: str, tokens_used: int) -> None:
+    def _scan_output(self, session: Session, raw: str, tokens_used: int) -> list[str]:
         """Phase 10 output defenses: jailbreak scan + anomaly tracking.
 
         Runs the advisory scans on the raw model response — jailbreak/refusal
         echoes (:func:`scan_llm_output`) and the per-agent response-length/
         token-usage anomaly detector. Anything found is written to the audit
         trail as a warning; nothing here blocks, because schema validation is
-        the gate that rejects bad output.
+        the gate that rejects bad output. The returned list carries only the
+        *content* flags — :meth:`analyze` uses it to keep responses that echo
+        an injection or leak an executable pattern out of the cache.
 
         Args:
             session:    The session being analyzed.
             raw:        The raw (uncleaned) LLM response.
             tokens_used: Token count reported by the LLM client.
+
+        Returns:
+            The content flag names raised for this response (empty when clean).
         """
-        flags = scan_llm_output(raw)
+        content_flags = scan_llm_output(raw)
+        anomaly_flags: list[str] = []
         try:
-            flags.extend(
-                get_anomaly_detector().record(self.agent_type.value, len(raw), tokens_used)
+            anomaly_flags = get_anomaly_detector().record(
+                self.agent_type.value, len(raw), tokens_used
             )
         except Exception:
             _logger.debug("Anomaly tracking failed", exc_info=True)
-        if not flags:
-            return
+        all_flags = content_flags + anomaly_flags
+        if not all_flags:
+            return []
         _logger.warning(
             "Agent %s returned suspicious output (session %s): %s",
             self.agent_type.value,
             session.session_id,
-            ", ".join(flags),
+            ", ".join(all_flags),
         )
         event = TraceEvent(
             event_type="output_suspicious",
             agent_name=self.agent_type.value,
             status="warning",
             session_id=session.session_id,
-            extra={"flags": flags},
+            extra={"flags": all_flags},
         )
         get_audit_logger().log(event)
+        return content_flags
 
     @staticmethod
     def _reject_unknown_keys(
