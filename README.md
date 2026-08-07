@@ -86,61 +86,71 @@ python -c "import cloudoptima; print('CloudOptima v' + cloudoptima.__version__)"
 
 ## Architecture Overview
 
-```
-User Input (Streamlit Form)
-        │
-        ▼
-┌───────────────────┐
-│   Orchestrator    │
-│  ┌─────────────┐  │
-│  │  Architect  │  │
-│  │ Cost Analyst│  │
-│  │  Security   │  │
-│  │ Compliance  │  │
-│  │   Judge     │  │
-│  └─────────────┘  │
-└────────┬──────────┘
-         │
-         ▼
-   Results Dashboard
-  (4 tabs: Overview,
-   Agents, Conflicts,
-   Artifacts)
+Here's the whole system as one picture — rendered live by GitHub:
+
+```mermaid
+flowchart TD
+    U["💬 You describe your infrastructure in plain English"]
+    F["🖥️ Streamlit input form<br/>region · budget · compliance frameworks"]
+    S["🧼 Sanitizer<br/>injection · XSS · SQLi · null bytes"]
+    O["⚙️ Orchestrator<br/>runs pipeline · detects conflicts · enforces budget"]
+
+    U --> F --> S --> O
+
+    subgraph PIPELINE["5-agent pipeline"]
+        direction TB
+        A["🏗️ Architect<br/>compute · storage · network · data"]
+        C["💰 Cost Analyst<br/>grounded with live Azure Retail Prices"]
+        SE["🔐 Security Engineer<br/>risk scan · IaC malware scan"]
+        CO["📜 Compliance Officer<br/>21 rules + RAG"]
+        J["⚖️ Judge<br/>arbitrates conflicts"]
+
+        A --> C
+        A --> SE
+        A --> CO
+        C --> J
+        SE --> J
+        CO --> J
+    end
+
+    O --> A
+
+    subgraph ROUTER["LLM router (phases 7.5–7.6)"]
+        direction LR
+        R1["Nvidia NIM<br/>free tier"]
+        R2["Azure OpenAI"]
+        R3["OpenAI"]
+        R4["Anthropic Claude"]
+        R5["Google Gemini"]
+    end
+
+    PIPELINE -. "every agent call → cheapest healthy provider · auto-failover · gzip cache" .-> ROUTER
+
+    J --> T1["🏗️ IaC templates"]
+    J --> T2["💰 Cost forecast + savings"]
+    J --> T3["🔐 Security report"]
+    J --> T4["📜 Compliance status"]
+
+    T1 & T2 & T3 & T4 --> D["📊 Results dashboard<br/>Overview · Agents · Conflicts · Artifacts"]
+    D --> E["📥 Downloads · 📈 session history · 🧾 audit logs"]
+
+    classDef input fill:#e8f0fe,stroke:#4285f4,stroke-width:1px;
+    classDef agents fill:#fef7e0,stroke:#f9ab00,stroke-width:1px;
+    classDef router fill:#fce8e6,stroke:#ea4335,stroke-width:1px;
+    classDef out fill:#f3e8fd,stroke:#a142f4,stroke-width:1px;
+    class U,F,S,O input;
+    class PIPELINE agents;
+    class ROUTER router;
+    class T1,T2,T3,T4,D,E out;
 ```
 
-### Multi-Agent Workflow
-
-```
-User describes infrastructure needs
-        │
-        ▼
-┌─────────────────┐     ┌──────────────────┐
-│   Architect     │────▶│  Cost Analyst    │
-│ (designs system)│     │ (estimates cost) │
-└────────┬────────┘     └────────┬─────────┘
-         │                       │
-         ▼                       ▼
-┌─────────────────┐     ┌──────────────────┐
-│   Security      │     │   Compliance     │
-│ (finds risks)   │     │ (checks rules)   │
-└────────┬────────┘     └────────┬─────────┘
-         │                       │
-         └───────────┬───────────┘
-                     ▼
-            ┌──────────────────┐
-            │     Judge        │
-            │ (resolves        │
-            │  conflicts)      │
-            └────────┬─────────┘
-                     │
-                     ▼
-          Architecture Plan + 
-          Cost Report + 
-          Security Audit + 
-          Compliance Check
-```
+> **How to read it:** the orange box is the 5-agent brain, the red box is the cost-aware
+> LLM router underneath it — every agent call is routed to the *cheapest healthy
+> provider* with automatic failover. The purple boxes are the four artifacts the
+> pipeline produces for every run.
 
 ---
+
 
 ## Tech Stack
 
