@@ -17,8 +17,10 @@ pytest-cov>=5.0,<6.0
 ruff>=0.5,<1.0
 mypy>=1.10,<2.0
 
-# ── Optional: Compliance RAG (Phase 8) ─────────
+# ── Compliance RAG (Phase 8.2, OPTIONAL) ─────────
+# Vector-store backend for compliance retrieval. rag.py uses it when present
+# and falls back to a deterministic keyword-overlap retriever otherwise, so
+# the app works without it. Install with: pip install -e .[rag]
+# NOTE: on Windows the chroma-hnswlib wheel needs the C++ build tools; the
+# optional fallback keeps the full pipeline working if you skip it.
 # chromadb>=0.5,<1.0
-# Uncomment the line above when you reach Phase 8.
-# On Windows, you may need Microsoft C++ Build Tools first:
-# https://visualstudio.microsoft.com/visual-cpp-build-tools/

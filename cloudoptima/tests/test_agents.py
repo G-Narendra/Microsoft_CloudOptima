@@ -23,7 +23,7 @@ from cloudoptima.agents import (
     JudgeAgent,
     SecurityEngineerAgent,
 )
-from cloudoptima.agents.compliance import COMPLIANCE_RULES
+from cloudoptima.compliance.rules import COMPLIANCE_RULES
 from cloudoptima.config import Settings
 from cloudoptima.llm_client import BaseLLMClient, MockClient
 from cloudoptima.models import AgentTurn, AgentType, ComplianceFramework, Conflict, Session
@@ -468,7 +468,7 @@ def test_compliance_validation_accepts_needs_work_with_failure() -> None:
 def test_compliance_system_prompt_hardcodes_all_21_rules() -> None:
     """Every one of the 21 rules appears in the system prompt (v1 lesson 7)."""
     prompt = ComplianceOfficerAgent.system_prompt
-    for rule in COMPLIANCE_RULES:
+    for rule in COMPLIANCE_RULES.values():
         assert rule["id"] in prompt
         assert rule["name"] in prompt
         assert rule["description"] in prompt
@@ -798,6 +798,47 @@ def test_agent_invalid_output_returns_error_turn() -> None:
 
 
 # ── Prior-turn rendering (pipeline wiring for Phase 6) ────────────────────
+
+
+def test_cost_analyst_prompt_includes_live_prices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cost analyst's prompt carries real Azure Retail Prices (8.4).
+
+    The live fetch is patched to a canned row so the assertion is about the
+    prompt wiring, not the network. The block must name the service, the
+    per-unit price, and the data source.
+    """
+    import cloudoptima.agents.cost_analyst as cost_analyst_module
+
+    monkeypatch.setattr(
+        cost_analyst_module,
+        "live_prices",
+        lambda names, region: [
+            {
+                "service": "Azure Kubernetes Service",
+                "price": 0.0231,
+                "unit": "1 Hour",
+                "source": "live",
+            }
+        ],
+    )
+
+    session = _make_session(services="AKS cluster with Redis")
+    agent = _make_agent(CostAnalystAgent, AgentType.COST_ANALYST)
+    prompt = agent._build_prompt(session)
+
+    assert "AZURE RETAIL PRICES (LIVE, per-unit list prices in USD):" in prompt
+    assert "Azure Kubernetes Service: $0.02 per 1 Hour [azure_retail_api]" in prompt
+
+
+def test_cost_analyst_prompt_degrades_gracefully_offline() -> None:
+    """A network blip renders a factual no-prices line, never a crash."""
+    session = _make_session(services="AKS")
+    agent = _make_agent(CostAnalystAgent, AgentType.COST_ANALYST)
+    prompt = agent._build_prompt(session)
+
+    assert "no Azure services matched" in prompt
 
 
 def test_compliance_prompt_includes_architect_design() -> None:

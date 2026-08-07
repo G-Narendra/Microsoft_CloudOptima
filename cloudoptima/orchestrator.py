@@ -1,27 +1,26 @@
-"""Orchestrator — runs the full multi-agent pipeline (Phase 6).
+"""Orchestrator — runs the five-agent pipeline (Phase 6).
 
-Coordinates the five agents end-to-end:
+What happens, in order:
 
-1. Run the four specialists in order (Architect → Cost Analyst → Security
-   Engineer → Compliance Officer), appending each validated :class:`AgentTurn`
-   to ``session.agent_turns`` so downstream agents can read upstream output
-   (the judge always sees all four specialists plus the detected conflicts).
-2. Detect disagreements across the **six** pair combinations of the four
-   specialists. Detection is deterministic and keyed per pair so the budget
-   check can only fire for (Architect, Cost Analyst) — a v1 lesson: budget
-   conflicts used to fire for every pair, tripling duplicates. Each agent's
-   schema is read directly, so cross-agent key mismatches (compliance's
-   ``rules`` vs security's ``findings``) can never produce a false conflict.
-3. Run the Judge with all outputs + the detected conflicts, then fold the
-   judge's arbitration back into the session (filling resolutions and adopting
-   conflicts the deterministic detector missed).
-4. Generate four artifacts: IaC (Bicep) template, cost forecast, compliance
-   report, and arbitration summary. The IaC artifact is malware-scanned before
-   it is stored.
+1. The four specialists run sequentially (Architect → Cost Analyst → Security
+   → Compliance). Each turn lands on ``session.agent_turns`` as it completes,
+   so downstream agents read upstream output and the judge sees all four plus
+   the detected conflicts.
+2. Disagreements are detected across all **six** specialist pairs. Detection
+   is deterministic and keyed per pair — the budget check can only fire for
+   (Architect, Cost Analyst). (v1 lesson: it used to fire for every pair and
+   tripled the duplicates.) Schemas are read directly, so a key mismatch
+   between agents (compliance's ``rules`` vs security's ``findings``) can
+   never invent a conflict.
+3. The Judge arbitrates with all outputs + the conflicts; its resolutions are
+   folded back into the session, and conflicts it noticed but the detector
+   missed are adopted.
+4. Four artifacts are generated: Bicep template, cost forecast, compliance
+   report, arbitration summary. The IaC is malware-scanned before it's stored.
 
-Failure isolation: an individual agent failure is captured as an error turn by
-:class:`BaseAgent` and the pipeline continues. If something unexpected still
-raises, ``run`` marks the session ``failed`` and returns it — never crashes.
+Failure isolation: an agent that fails becomes an error turn and the pipeline
+keeps going. If anything unexpected still raises, ``run`` marks the session
+``failed`` and returns it — it never crashes the caller.
 
 Example:
     >>> from cloudoptima.orchestrator import Orchestrator
@@ -34,6 +33,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import time
 from datetime import UTC, datetime
 from typing import Any, Final
@@ -45,7 +45,7 @@ from cloudoptima.llm_client import create_llm_client
 from cloudoptima.llm_routing import create_routed_client
 from cloudoptima.models import AgentTurn, AgentType, Artifact, Conflict, Session
 from cloudoptima.observability import TraceEvent, get_audit_logger
-from cloudoptima.sanitize import clean_output, scan_for_malware_in_iac
+from cloudoptima.sanitize import clean_output, rate_limit, scan_for_malware_in_iac
 
 _logger = logging.getLogger(__name__)
 
@@ -118,6 +118,45 @@ _ARTIFACT_DESCRIPTIONS: Final[dict[str, str]] = {
     "arbitration_summary": "Judge arbitration: final recommendation and resolutions",
 }
 
+# Rate limiting (Phase 10.4). The global key and window are shared by every
+# orchestrator instance in this process, matching the checklist's "60 analyses
+# per hour" rule. Per-session concurrency is enforced by _SessionGate.
+_GLOBAL_RATE_KEY: Final[str] = "global"
+_GLOBAL_RATE_WINDOW_SEC: Final[float] = 3600.0
+
+
+class _SessionGate:
+    """Tracks in-flight pipeline runs per session (Phase 10.4).
+
+    ``rate_limit_per_session`` (default 1) bounds how many pipeline runs may be
+    in flight for the same session id at once. The dashboard disables its
+    Analyze button while a run is active, but the gate is the real enforcement
+    for the CLI and any concurrent callers — without it, two threads could
+    race the same session and interleave agent turns.
+    """
+
+    def __init__(self) -> None:
+        self._counts: dict[str, int] = {}
+        self._lock = threading.Lock()
+
+    def acquire(self, session_id: str, limit: int) -> bool:
+        """Try to start a run for ``session_id``; False when at capacity."""
+        with self._lock:
+            current = self._counts.get(session_id, 0)
+            if current >= limit:
+                return False
+            self._counts[session_id] = current + 1
+            return True
+
+    def release(self, session_id: str) -> None:
+        """End a run for ``session_id`` (idempotent)."""
+        with self._lock:
+            current = self._counts.get(session_id, 0)
+            if current <= 1:
+                self._counts.pop(session_id, None)
+            else:
+                self._counts[session_id] = current - 1
+
 
 class Orchestrator:
     """Runs the five-agent pipeline over a session and returns the updated session.
@@ -147,6 +186,7 @@ class Orchestrator:
             raise ValueError(f"Orchestrator is missing agents: {sorted(m.value for m in missing)}")
         self.agents = agents
         self.config = config
+        self._session_gate = _SessionGate()
 
     @classmethod
     def from_settings(cls, settings: Settings) -> Orchestrator:
@@ -177,18 +217,11 @@ class Orchestrator:
     def run(self, session: Session) -> Session:
         """Execute the full pipeline over a session. Never raises.
 
-        Steps:
-        1. Reset pipeline outputs (agent turns, conflicts, artifacts) so
-           re-running the same session is deterministic.
-        2. Run the four specialists in order, appending each turn so
-           downstream agents (and the judge) see upstream output.
-        3. Detect conflicts across the six specialist pairs.
-        4. Run the judge with all outputs plus the detected conflicts.
-        5. Fold the judge's arbitration back into the session.
-        6. Generate the four artifacts (IaC is malware-scanned).
-
-        Any unexpected exception marks the session ``failed`` and returns it
-        with whatever turns completed — the pipeline never crashes the caller.
+        Pipeline outputs are reset first so re-running the same session is
+        deterministic; then the four specialists run, conflicts are detected,
+        the judge arbitrates, and the four artifacts are generated. Any
+        unexpected exception marks the session ``failed`` and returns it with
+        whatever turns completed — the caller never sees a crash.
 
         Args:
             session: The session to analyze. User inputs are preserved; the
@@ -199,8 +232,54 @@ class Orchestrator:
             ``failed``.
         """
         started = time.monotonic()
+
+        # Phase 10.4: block BEFORE any LLM call so a throttled analysis costs
+        # no API credits. The global hourly quota is shared process-wide.
+        if not rate_limit(
+            _GLOBAL_RATE_KEY,
+            self.config.rate_limit_global_per_hour,
+            _GLOBAL_RATE_WINDOW_SEC,
+        ):
+            session.status = "failed"
+            session.updated_at = datetime.now(UTC)
+            session.error_message = (
+                "Rate limit exceeded: the global hourly quota "
+                f"({self.config.rate_limit_global_per_hour} analyses/hour) is exhausted. "
+                "Try again in about an hour."
+            )
+            self._log_run_event(
+                session, started, "rate_limited",
+                extra={"reason": "global hourly quota exhausted"},
+            )
+            return session
+
+        # Phase 10.4: at most `rate_limit_per_session` runs in flight per
+        # session (default 1) — prevents two threads interleaving one session.
+        if not self._session_gate.acquire(
+            session.session_id, self.config.rate_limit_per_session
+        ):
+            session.status = "failed"
+            session.updated_at = datetime.now(UTC)
+            session.error_message = (
+                "Rate limit exceeded: another analysis for this session is "
+                "already running. Wait for it to finish."
+            )
+            self._log_run_event(
+                session, started, "rate_limited",
+                extra={"reason": "session already in flight"},
+            )
+            return session
+
+        try:
+            return self._run_locked(session, started)
+        finally:
+            self._session_gate.release(session.session_id)
+
+    def _run_locked(self, session: Session, started: float) -> Session:
+        """Execute the pipeline after the rate-limit gates have passed."""
         session.status = "running"
         session.updated_at = datetime.now(UTC)
+        session.error_message = ""
 
         # Deterministic re-runs: pipeline outputs are owned by run().
         session.agent_turns = []
@@ -228,6 +307,7 @@ class Orchestrator:
         except Exception as exc:
             _logger.exception("Orchestrator run failed for session %s", session.session_id)
             session.status = "failed"
+            session.error_message = clean_output(str(exc))[:500]
             self._log_run_event(session, started, "error", extra={"error": str(exc)})
             return session
 

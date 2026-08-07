@@ -1,12 +1,17 @@
-"""Input/output sanitization for CloudOptima.
+"""Input/output sanitization.
 
-Everything entering the system goes through :func:`clean_input`; everything
-coming back from an LLM goes through :func:`clean_output`. Both always return a
-string and never raise, because the orchestrator (Phase 6) must not crash on
-hostile input.
+Two rules of thumb:
 
-Detection is kept separate from cleaning: :func:`detect_injection` reports
-whether text looks like a jailbreak attempt without modifying it, so callers
+- :func:`clean_input` is the front door — everything a user can type goes
+  through it.
+- :func:`clean_output` is the back door — everything an LLM returns goes
+  through it before it's parsed or shown.
+
+Both always return a string and never raise, because the pipeline must not
+crash on hostile input.
+
+Detection stays separate from cleaning: :func:`detect_injection` reports
+whether text *looks* like a jailbreak attempt without touching it, so callers
 decide whether to warn, log, or block.
 
 Typical usage:
@@ -37,6 +42,7 @@ __all__ = [
     "rate_limit",
     "reset_rate_limits",
     "scan_for_malware_in_iac",
+    "scan_llm_output",
     "try_parse_json",
 ]
 
@@ -140,6 +146,30 @@ _MALWARE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b(?:cmd|powershell|bash|sh)\s*-c\s*[\"']"),
     re.compile(r"\$\s*\("),  # $(command) shell substitution
     re.compile(r"`[^`\n]+`"),  # backtick command substitution
+    # curl ... | bash / wget ... | sh — download-and-execute chains.
+    re.compile(r"\bcurl\b[^\n;|]{0,300}\|\s*(?:sudo\s+)?(?:sh|bash)\b", re.I),
+    re.compile(r"\bwget\b[^\n;|]{0,300}\|\s*(?:sudo\s+)?(?:sh|bash)\b", re.I),
+    # Any pipe into a shell — never legitimate inside an IaC template.
+    re.compile(r"\|\s*(?:sudo\s+)?(?:sh|bash)\b"),
+)
+
+# Long base64-looking runs. Real base64 payloads are length >= 200 chars and
+# mix at least two of (digits, upper, lower); a 400-char run of one repeated
+# letter is prose/name junk, not an encoded payload.
+_BASE64_RUN: re.Pattern[str] = re.compile(r"[A-Za-z0-9+/]{200,}={0,2}")
+_BASE64_MIN_CHARS: int = 200
+
+# Phrases an LLM must never return: a refusal to do its job, or an echo of a
+# jailbreak it was told to ignore. These are scanned on *output* only and only
+# ever warn — schema validation remains the enforcement gate.
+_REFUSAL_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\b(?:i['\u2019]?m|i am)\s+(?:sorry|unable|not able)\b", re.I),
+    re.compile(r"\bcannot\s+(?:analy|process|provid|complet|help)\w*", re.I),
+    re.compile(r"\bas an ai (?:language model|assistant)\b", re.I),
+    re.compile(
+        r"\bi\s+(?:cannot|can't|won't|wont)\s+(?:analy|provid|complet|assist|respond)\w*",
+        re.I,
+    ),
 )
 
 
@@ -161,11 +191,11 @@ def _strip_html(text: str) -> str:
 def clean_input(text: object, max_length: int = DEFAULT_MAX_LENGTH) -> str:
     """Clean untrusted user input. Always returns a string; never raises.
 
-    Strips null bytes and control characters, normalizes Unicode homoglyphs,
-    removes HTML/JS injection, neutralizes SQL metacharacters, strips path
-    traversal, collapses whitespace, and truncates to ``max_length``.
-
-    Non-string input is coerced with ``str``; ``None`` becomes ``""``.
+    Strips null bytes and control characters, folds Unicode homoglyphs to
+    their ASCII lookalikes, removes HTML/JS injection, neutralizes SQL
+    metacharacters, strips path traversal, collapses whitespace, and
+    truncates to ``max_length``. Non-strings are coerced with ``str``;
+    ``None`` becomes ``""``.
 
     Args:
         text: The untrusted value to clean.
@@ -236,18 +266,29 @@ def clean_output(text: object, max_length: int = DEFAULT_MAX_LENGTH * 10) -> str
     return text
 
 
+def _looks_like_base64(chunk: str) -> bool:
+    """True when a run mixes at least two of digits/upper/lower — real base64."""
+    has_digit = any(char.isdigit() for char in chunk)
+    has_upper = any(char.isupper() for char in chunk)
+    has_lower = any(char.islower() for char in chunk)
+    return sum((has_digit, has_upper, has_lower)) >= 2
+
+
 def scan_for_malware_in_iac(iac_content: object) -> list[str]:
     """Scan generated IaC content for executable/malicious primitives.
 
     Called before an artifact is committed to the session, so a model that
     echoes back an injected payload (e.g. ``exec('rm -rf /')``) gets caught
-    before it reaches the dashboard.
+    before it reaches the dashboard. Also flags base64 blobs of 200+ characters
+    (encoded payloads are a common smuggling vector) and pipe-to-shell chains
+    such as ``curl ... | bash``.
 
     Args:
         iac_content: The raw IaC template text to inspect.
 
     Returns:
-        A list of the matched malicious substrings (empty when clean).
+        A list of the matched malicious substrings (empty when clean). Base64
+        hits are reported as ``"base64_blob(N chars)"`` markers.
     """
     if not isinstance(iac_content, str) or not iac_content.strip():
         return []
@@ -256,7 +297,53 @@ def scan_for_malware_in_iac(iac_content: object) -> list[str]:
         found = pattern.search(iac_content)
         if found:
             matches.append(found.group(0))
+    for match in _BASE64_RUN.finditer(iac_content):
+        chunk = match.group(0).rstrip("=")
+        if len(chunk) >= _BASE64_MIN_CHARS and _looks_like_base64(chunk):
+            matches.append(f"base64_blob({len(chunk)} chars)")
     return matches
+
+
+def scan_llm_output(text: object) -> list[str]:
+    """Scan a raw LLM response for signs the model was compromised (Phase 10.1).
+
+    Three signals are reported, never acted on:
+
+    - ``"injection_echo"`` — the response repeats a jailbreak/injection phrase
+      (DAN, "ignore previous instructions", "system prompt:" leakage).
+    - ``"refusal_to_analyze"`` — the model refused the task ("I cannot
+      analyze", "As an AI language model ..."), which usually means the
+      pipeline is about to produce an error turn.
+    - ``"executable_pattern"`` — executable primitives leaked into the response.
+    - ``"base64_blob"`` — a base64-looking blob of 200+ characters, a common
+      payload-smuggling vector.
+
+    The audit trail records the flags; :meth:`BaseAgent._validate_output` is the
+    enforcement gate that actually rejects bad output. Scanning favours
+    precision, and the report is advisory, so a false positive only adds a
+    warning line to the audit log.
+
+    Args:
+        text: The raw LLM response to inspect.
+
+    Returns:
+        A list of flag names (empty when the response looks clean).
+    """
+    if not isinstance(text, str) or not text.strip():
+        return []
+    flags: list[str] = []
+    if detect_injection(text):
+        flags.append("injection_echo")
+    if any(pattern.search(text) for pattern in _REFUSAL_PATTERNS):
+        flags.append("refusal_to_analyze")
+    if any(pattern.search(text) for pattern in _MALWARE_PATTERNS):
+        flags.append("executable_pattern")
+    if any(
+        _looks_like_base64(run.rstrip("=")) and len(run.rstrip("=")) >= _BASE64_MIN_CHARS
+        for run in _BASE64_RUN.findall(text)
+    ):
+        flags.append("base64_blob")
+    return flags
 
 
 def compile_blocked_patterns() -> dict[str, list[re.Pattern[str]]]:

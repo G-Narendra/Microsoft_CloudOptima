@@ -1,7 +1,9 @@
-"""LLM client abstraction layer for CloudOptima.
+"""LLM clients — one interface, six backends.
 
-Provides a unified interface for multiple LLM backends (Mock, Nvidia NIM,
-Azure OpenAI) with a factory function and retry wrapper for fault tolerance.
+Mock, Nvidia NIM, Azure OpenAI, OpenAI (direct), Anthropic Claude, and Google
+Gemini all implement :class:`BaseLLMClient`. :func:`create_llm_client` builds
+the right one from settings, and :func:`generate_with_retry` wraps any of them
+with exponential backoff.
 """
 
 from __future__ import annotations
@@ -42,7 +44,16 @@ def _strip_control_chars(text: str) -> str:
 
 
 class BaseLLMClient(ABC):
-    """Abstract base class for all LLM client implementations."""
+    """Abstract base class for all LLM client implementations.
+
+    Attributes:
+        last_tokens_used: Total tokens consumed by the most recent
+            :meth:`generate` call. Real clients read it from the provider's
+            usage payload; MockClient estimates from text length. Agents read
+            this after a call to record per-turn token usage (Phase 10.2).
+    """
+
+    last_tokens_used: int = 0
 
     @abstractmethod
     def generate(self, prompt: str, system_prompt: str = "") -> str:
@@ -196,7 +207,6 @@ MOCK_RESPONSES: dict[str, dict[str, Any]] = {
         },
         "final_recommendation": "Proceed with AKS-based architecture with noted adjustments",
         "overridden_agents": ["security"],
-        "justification": "Balanced cost and security by using NSG-based controls with DDoS Basic",
     },
 }
 
@@ -251,6 +261,8 @@ class MockClient(BaseLLMClient):
         """Return a canned JSON response based on detected agent type."""
         agent_key = _detect_agent_type(prompt, system_prompt)
         response = MOCK_RESPONSES.get(agent_key, MOCK_RESPONSES["architect"])
+        # ~4 characters per token — mirrors llm_routing.estimate_tokens.
+        self.last_tokens_used = max(1, len(json.dumps(response)) // 4)
         time.sleep(0.05)  # Simulate minimal latency
         return json.dumps(response)
 
@@ -259,10 +271,9 @@ class MockClient(BaseLLMClient):
 
 
 class NvidiaClient(BaseLLMClient):
-    """LLM client for Nvidia NIM API via httpx.
+    """Nvidia NIM client (OpenAI-compatible endpoint, via httpx).
 
-    Calls the OpenAI-compatible chat/completions endpoint at
-    https://integrate.api.nvidia.com/v1.
+    Hits https://integrate.api.nvidia.com/v1 chat/completions.
     """
 
     BASE_URL = "https://integrate.api.nvidia.com/v1"
@@ -309,6 +320,9 @@ class NvidiaClient(BaseLLMClient):
             response.raise_for_status()
             data = response.json()
 
+        usage = data.get("usage") or {}
+        self.last_tokens_used = int(usage.get("total_tokens", 0) or 0)
+
         content: str = data["choices"][0]["message"]["content"]
         if not content:
             _logger.warning("NvidiaClient received empty response")
@@ -320,10 +334,7 @@ class NvidiaClient(BaseLLMClient):
 
 
 class AzureClient(BaseLLMClient):
-    """LLM client for Azure OpenAI via the openai Python SDK.
-
-    Supports JSON mode via response_format parameter.
-    """
+    """Azure OpenAI client (openai SDK, JSON mode)."""
 
     def __init__(
         self, settings: Settings, model: str | None = None, timeout: float | None = None
@@ -369,23 +380,215 @@ class AzureClient(BaseLLMClient):
         )
 
         content = response.choices[0].message.content
+        usage = getattr(response, "usage", None)
+        self.last_tokens_used = int(getattr(usage, "total_tokens", 0) or 0)
         if not content:
             _logger.warning("AzureClient received empty response")
             return ""
         return _strip_control_chars(content)
 
 
+# ── OpenAI (direct) Client ────────────────────────────────────────────────────
+
+
+class OpenAIClient(BaseLLMClient):
+    """OpenAI (direct) client — same SDK as Azure, against api.openai.com.
+
+    Uses ``json_object`` response mode.
+    """
+
+    def __init__(
+        self, settings: Settings, model: str | None = None, timeout: float | None = None
+    ) -> None:
+        api_key = settings.openai_api_key.get_secret_value()
+        if not api_key:
+            raise ValueError(
+                "openai_api_key is required for OpenAIClient. "
+                "Set OPENAI_API_KEY in .env or use DEMO_MODE=true."
+            )
+        self._client = openai.OpenAI(api_key=api_key)
+        self._model = model or settings.llm_openai_model
+        self._temperature = settings.llm_temperature
+        self._timeout = timeout if timeout is not None else settings.llm_timeout
+
+    def generate(self, prompt: str, system_prompt: str = "") -> str:
+        """Send a chat completion request to OpenAI with JSON mode."""
+        messages: list[dict[str, str]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        else:
+            messages.append({"role": "system", "content": "Respond with valid JSON."})
+        messages.append({"role": "user", "content": prompt})
+
+        response = self._client.chat.completions.create(
+            messages=cast(Any, messages),
+            model=self._model,
+            temperature=self._temperature,
+            response_format={"type": "json_object"},
+            timeout=float(self._timeout),
+        )
+
+        content = response.choices[0].message.content
+        usage = getattr(response, "usage", None)
+        self.last_tokens_used = int(getattr(usage, "total_tokens", 0) or 0)
+        if not content:
+            _logger.warning("OpenAIClient received empty response")
+            return ""
+        return _strip_control_chars(content)
+
+
+# ── Anthropic Claude Client ───────────────────────────────────────────────────
+
+
+class AnthropicClient(BaseLLMClient):
+    """Anthropic Claude client (Messages API, via httpx).
+
+    Hits https://api.anthropic.com/v1/messages with the ``x-api-key`` header.
+    No SDK dependency — the raw endpoint keeps the footprint small and
+    matches the Nvidia client pattern.
+    """
+
+    BASE_URL = "https://api.anthropic.com"
+    API_VERSION = "2023-06-01"
+
+    def __init__(
+        self, settings: Settings, model: str | None = None, timeout: float | None = None
+    ) -> None:
+        self._api_key = settings.anthropic_api_key.get_secret_value()
+        self._model = model or settings.llm_anthropic_model
+        self._temperature = settings.llm_temperature
+        self._timeout = timeout if timeout is not None else settings.llm_timeout
+
+        if not self._api_key:
+            raise ValueError(
+                "anthropic_api_key is required for AnthropicClient. "
+                "Set ANTHROPIC_API_KEY in .env or use DEMO_MODE=true."
+            )
+
+    def generate(self, prompt: str, system_prompt: str = "") -> str:
+        """Send a messages request to the Anthropic API."""
+        headers = {
+            "x-api-key": self._api_key,
+            "anthropic-version": self.API_VERSION,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        payload = {
+            "model": self._model,
+            "max_tokens": 4096,
+            "temperature": self._temperature,
+            "system": system_prompt or "Respond with valid JSON.",
+            "messages": [{"role": "user", "content": prompt}],
+        }
+
+        with httpx.Client(
+            base_url=self.BASE_URL,
+            headers=headers,
+            timeout=float(self._timeout),
+        ) as client:
+            response = client.post("/v1/messages", json=payload)
+            response.raise_for_status()
+            data = response.json()
+
+        usage = data.get("usage") or {}
+        self.last_tokens_used = int(usage.get("input_tokens", 0) or 0) + int(
+            usage.get("output_tokens", 0) or 0
+        )
+
+        content_blocks = data.get("content") or []
+        text_parts = [
+            block.get("text", "")
+            for block in content_blocks
+            if isinstance(block, dict) and isinstance(block.get("text"), str)
+        ]
+        content = "".join(text_parts)
+        if not content:
+            _logger.warning("AnthropicClient received empty response")
+            return ""
+        return _strip_control_chars(content)
+
+
+# ── Google Gemini Client ──────────────────────────────────────────────────────
+
+
+class GoogleClient(BaseLLMClient):
+    """Google Gemini client (generateContent endpoint, via httpx).
+
+    The key rides in the ``x-goog-api-key`` header — never in the URL, so it
+    can't leak into proxy or access logs.
+    """
+
+    BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+
+    def __init__(
+        self, settings: Settings, model: str | None = None, timeout: float | None = None
+    ) -> None:
+        self._api_key = settings.google_api_key.get_secret_value()
+        self._model = model or settings.llm_google_model
+        self._temperature = settings.llm_temperature
+        self._timeout = timeout if timeout is not None else settings.llm_timeout
+
+        if not self._api_key:
+            raise ValueError(
+                "google_api_key is required for GoogleClient. "
+                "Set GOOGLE_API_KEY in .env or use DEMO_MODE=true."
+            )
+
+    def generate(self, prompt: str, system_prompt: str = "") -> str:
+        """Send a generateContent request to the Gemini API."""
+        headers = {
+            "x-goog-api-key": self._api_key,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        payload: dict[str, Any] = {
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": self._temperature},
+        }
+        if system_prompt:
+            payload["systemInstruction"] = {"parts": [{"text": system_prompt}]}
+
+        with httpx.Client(
+            base_url=self.BASE_URL,
+            headers=headers,
+            timeout=float(self._timeout),
+        ) as client:
+            response = client.post(f"/models/{self._model}:generateContent", json=payload)
+            response.raise_for_status()
+            data = response.json()
+
+        usage = data.get("usageMetadata") or {}
+        self.last_tokens_used = int(usage.get("totalTokenCount", 0) or 0)
+
+        candidates = data.get("candidates") or []
+        if not candidates or not isinstance(candidates[0], dict):
+            _logger.warning("GoogleClient received empty response")
+            return ""
+        content = candidates[0].get("content") or {}
+        parts = content.get("parts") if isinstance(content, dict) else None
+        text_parts = [
+            part.get("text", "")
+            for part in (parts or [])
+            if isinstance(part, dict) and isinstance(part.get("text"), str)
+        ]
+        text = "".join(text_parts)
+        if not text:
+            _logger.warning("GoogleClient received empty response")
+            return ""
+        return _strip_control_chars(text)
+
+
 # ── Factory Function ─────────────────────────────────────────────────────────
 
 
 def create_llm_client(settings: Settings) -> BaseLLMClient:
-    """Create an LLM client based on the configured provider.
+    """Create the LLM client for the configured provider.
 
     Args:
         settings: Application settings with provider and API key config.
 
     Returns:
-        A concrete BaseLLMClient implementation.
+        A concrete :class:`BaseLLMClient` implementation.
 
     Raises:
         ValueError: If the provider is not recognized.
@@ -397,10 +600,16 @@ def create_llm_client(settings: Settings) -> BaseLLMClient:
         return NvidiaClient(settings)
     elif provider == "azure":
         return AzureClient(settings)
+    elif provider == "openai":
+        return OpenAIClient(settings)
+    elif provider == "anthropic":
+        return AnthropicClient(settings)
+    elif provider == "google":
+        return GoogleClient(settings)
     else:
         raise ValueError(
             f"Unknown LLM provider '{provider}'. "
-            f"Expected one of: mock, nvidia, azure."
+            "Expected one of: mock, nvidia, azure, openai, anthropic, google."
         )
 
 

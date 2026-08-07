@@ -26,6 +26,14 @@ from cloudoptima.config import Settings
 from cloudoptima.llm_client import MockClient
 from cloudoptima.models import AgentTurn, AgentType, Session
 from cloudoptima.orchestrator import Orchestrator
+from cloudoptima.sanitize import reset_rate_limits
+
+
+@pytest.fixture(autouse=True)
+def _reset_global_rate_limits() -> None:
+    """The orchestrator's global hourly limiter is process-wide; isolate tests."""
+    reset_rate_limits()
+
 
 # ── Test doubles ───────────────────────────────────────────────────────
 

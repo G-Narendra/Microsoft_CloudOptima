@@ -1,7 +1,8 @@
-"""Configuration module for CloudOptima.
+"""Type-safe application settings.
 
-Provides type-safe application settings loaded from environment variables
-and .env files with security redaction for sensitive fields.
+Loads from environment variables and ``.env`` (via pydantic-settings) and
+redacts every secret field from ``repr``/``str`` so keys never show up in
+logs or error messages.
 """
 
 from __future__ import annotations
@@ -24,7 +25,8 @@ class Settings(BaseSettings):
 
     # ── LLM Provider & API Keys ───────────────────────
     llm_provider: str = Field(
-        default="mock", description="LLM provider: mock, nvidia, azure"
+        default="mock",
+        description="LLM provider: mock, nvidia, azure, openai, anthropic, google",
     )
     nvidia_api_key: SecretStr = Field(
         default=SecretStr(""), description="Nvidia NIM API key"
@@ -37,6 +39,16 @@ class Settings(BaseSettings):
     )
     azure_openai_api_version: str = Field(
         default="2024-02-01", description="Azure OpenAI API version"
+    )
+    # Phase 7.6: direct OpenAI, Anthropic Claude, and Google Gemini.
+    openai_api_key: SecretStr = Field(
+        default=SecretStr(""), description="OpenAI (direct) API key"
+    )
+    anthropic_api_key: SecretStr = Field(
+        default=SecretStr(""), description="Anthropic Claude API key"
+    )
+    google_api_key: SecretStr = Field(
+        default=SecretStr(""), description="Google Gemini API key"
     )
 
     # ── Model Settings ───────────────────────────────
@@ -58,8 +70,9 @@ class Settings(BaseSettings):
     # NoDecode: the env var form is a plain comma string ("nvidia,azure"),
     # which pydantic-settings would otherwise try to JSON-decode and fail on.
     routing_providers: Annotated[list[str], NoDecode] = Field(
-        default_factory=lambda: ["nvidia", "azure"],
-        description="Providers eligible for routing (mock, nvidia, azure)",
+        default_factory=lambda: ["openai", "azure", "anthropic", "google", "nvidia"],
+        description="Providers eligible for routing "
+        "(mock, nvidia, azure, openai, anthropic, google)",
     )
     routing_max_cost_per_request: float = Field(
         default=0.005,
@@ -83,6 +96,27 @@ class Settings(BaseSettings):
     )
     llm_azure_fast_model: str = Field(
         default="gpt-4o-mini", description="Azure OpenAI fast-tier model"
+    )
+    # Phase 7.6: smart/fast models per provider.
+    llm_openai_model: str = Field(
+        default="gpt-4o-mini", description="OpenAI (direct) smart-tier model"
+    )
+    llm_openai_fast_model: str = Field(
+        default="gpt-4o-mini", description="OpenAI (direct) fast-tier model"
+    )
+    llm_anthropic_model: str = Field(
+        default="claude-sonnet-4-20250514",
+        description="Anthropic Claude smart-tier model",
+    )
+    llm_anthropic_fast_model: str = Field(
+        default="claude-3-5-haiku-20241022",
+        description="Anthropic Claude fast-tier model",
+    )
+    llm_google_model: str = Field(
+        default="gemini-2.0-flash", description="Google Gemini smart-tier model"
+    )
+    llm_google_fast_model: str = Field(
+        default="gemini-2.0-flash", description="Google Gemini fast-tier model"
     )
 
     # ── Debug & Operational Toggles ──────────────────
@@ -163,9 +197,9 @@ class Settings(BaseSettings):
     @classmethod
     def validate_provider(cls, v: str) -> str:
         """Ensure LLM provider is one of the supported values."""
-        allowed = {"mock", "nvidia", "azure"}
+        allowed = {"mock", "nvidia", "azure", "openai", "anthropic", "google"}
         if v.lower() not in allowed:
-            raise ValueError(f"llm_provider must be one of {allowed}, got '{v}'")
+            raise ValueError(f"llm_provider must be one of {sorted(allowed)}, got '{v}'")
         return v.lower()
 
     @field_validator("routing_providers", mode="before")
@@ -180,7 +214,7 @@ class Settings(BaseSettings):
     @classmethod
     def validate_routing_providers(cls, v: list[str]) -> list[str]:
         """Ensure every routing provider is one of the supported values."""
-        allowed = {"mock", "nvidia", "azure"}
+        allowed = {"mock", "nvidia", "azure", "openai", "anthropic", "google"}
         cleaned = [p.lower() for p in v]
         unknown = [p for p in cleaned if p not in allowed]
         if unknown:
@@ -194,6 +228,11 @@ class Settings(BaseSettings):
         return {
             "nvidia_api_key": "***REDACTED***" if has_nvidia else "",
             "azure_openai_api_key": "***REDACTED***" if has_azure else "",
+            "openai_api_key": "***REDACTED***" if self.openai_api_key.get_secret_value() else "",
+            "anthropic_api_key": "***REDACTED***"
+            if self.anthropic_api_key.get_secret_value()
+            else "",
+            "google_api_key": "***REDACTED***" if self.google_api_key.get_secret_value() else "",
         }
 
     def __repr__(self) -> str:

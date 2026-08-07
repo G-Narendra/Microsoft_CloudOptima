@@ -1,20 +1,20 @@
-"""Base agent class for CloudOptima — the shared skeleton every agent inherits.
+"""Base agent class — the shared skeleton every agent inherits.
 
-Implements the **Template Method** pattern: :meth:`BaseAgent.analyze` defines the
-fixed pipeline (build prompt → clean input → check cache → call LLM → clean
-output → extract JSON → validate → wrap in AgentTurn), while subclasses only
-implement :meth:`BaseAgent._build_prompt` and :meth:`BaseAgent._validate_output`.
+Uses the Template Method pattern: :meth:`BaseAgent.analyze` owns the whole
+pipeline (build prompt → clean input → check cache → call LLM → clean output
+→ extract JSON → validate → wrap in an AgentTurn), and subclasses only
+implement two methods: :meth:`BaseAgent._build_prompt` and
+:meth:`BaseAgent._validate_output`.
 
-Security is enforced here, in the base class, so subclasses cannot forget it:
+Security lives here on purpose, so a subclass can't forget it:
 
-- User-supplied values are wrapped in ``--- FIELD --- ... --- END ---`` delimiters.
-- Delimiter markers inside user text are stripped before wrapping.
-- The system prompt always carries an injection-guard sentence.
-- Every user-supplied value passes through :func:`clean_input` inside
-  :meth:`BaseAgent._wrap_field`; every response passes through
-  :func:`clean_output`.
-- Injection attempts are detected and written to the append-only audit trail.
-- The raw LLM response is written to the audit trail before it is parsed.
+- User input is wrapped in ``--- FIELD --- ... --- END ---`` delimiters, and
+  any marker runs inside the text are stripped first so the user can't forge
+  a fake boundary.
+- The system prompt always ends with an injection-guard sentence.
+- Every user value passes through :func:`clean_input`; every model response
+  through :func:`clean_output`.
+- Injection attempts and raw responses are both written to the audit trail.
 
 Example:
     >>> class ArchitectAgent(BaseAgent):
@@ -39,8 +39,14 @@ from cloudoptima.config import Settings
 from cloudoptima.llm_cache import LLMCache
 from cloudoptima.llm_client import BaseLLMClient, generate_with_retry
 from cloudoptima.models import AgentTurn, AgentType, Session
-from cloudoptima.observability import TraceEvent, get_audit_logger
-from cloudoptima.sanitize import clean_input, clean_output, detect_injection, extract_json
+from cloudoptima.observability import TraceEvent, get_anomaly_detector, get_audit_logger
+from cloudoptima.sanitize import (
+    clean_input,
+    clean_output,
+    detect_injection,
+    extract_json,
+    scan_llm_output,
+)
 
 # ── Module-level logger ─────────────────────────────────────────────────
 _logger = logging.getLogger(__name__)
@@ -138,12 +144,11 @@ class BaseAgent(ABC):
             )
             return self._error_turn(f"prompt build failed: {exc}")
 
-        # Scan for injection attempts. User-supplied values are already cleaned
-        # inside _wrap_field, and the assembled prompt keeps its ``--- FIELD ---``
-        # markers so the LLM sees real boundaries (a whole-prompt clean_input
-        # would strip those markers — they match the SQL-comment regex). The
-        # markers are removed from the *detection copy only*: the scanner's own
-        # "--- END ---" pattern would otherwise flag every benign prompt.
+        # Scan for injection attempts. The prompt keeps its ``--- FIELD ---``
+        # markers (a whole-prompt clean_input would strip them — they match the
+        # SQL-comment regex), so we strip the markers from the *detection copy
+        # only*; otherwise the scanner's own "--- END ---" pattern would flag
+        # every benign prompt.
         if detect_injection(_DELIMITER_MARKER.sub("", prompt)):
             self._log_injection(session)
 
@@ -175,12 +180,19 @@ class BaseAgent(ABC):
         # system-prompt leakage, so a model that echoes an injected payload must
         # still leave its trace here.
         self._audit_response(session, raw)
+
+        # Phase 10 defenses on the raw output: token accounting, jailbreak/refusal
+        # scanning, and response-length/token anomaly detection (all advisory —
+        # schema validation below is the enforcement gate).
+        tokens_used = getattr(self.llm_client, "last_tokens_used", 0) or 0
+        self._scan_output(session, raw, tokens_used)
+
         cleaned = clean_output(raw)
 
         latency = (time.monotonic() - start) * 1000
-        turn = self._build_turn(cleaned, latency)
+        turn = self._build_turn(cleaned, latency, tokens_used)
 
-        # Only cache successful results — error turns must never be replayed.
+        # Never cache error turns — replaying a failure is worse than a miss.
         if "error" not in turn.output:
             self._cache.put(prompt, guarded_prompt, model, temperature, cleaned)
         return turn
@@ -191,11 +203,10 @@ class BaseAgent(ABC):
     def _build_prompt(self, session: Session) -> str:
         """Build the agent-specific prompt from session data.
 
-        Wrap every user-supplied value with :meth:`_wrap_field` so hostile input
-        is delimited and neutralized. Keep JSON schema examples, role phrases,
-        and instruction text in the system prompt, not here — the assembled
-        prompt is scanned by ``detect_injection``, so instruction-like wording
-        in the prompt body would trip a spurious injection warning.
+        Wrap every user value with :meth:`_wrap_field`. Keep the JSON schema
+        examples and role phrasing in the system prompt, not here — the
+        assembled prompt is scanned by ``detect_injection``, so instruction-like
+        wording in the body would set off a false injection warning.
         """
 
     @abstractmethod
@@ -274,12 +285,15 @@ class BaseAgent(ABC):
         base = self.system_prompt.strip()
         return f"{base}\n\n{INJECTION_GUARD}" if base else INJECTION_GUARD
 
-    def _build_turn(self, response: str, latency_ms: float) -> AgentTurn:
+    def _build_turn(
+        self, response: str, latency_ms: float, tokens_used: int = 0
+    ) -> AgentTurn:
         """Extract, validate, and wrap a cleaned LLM response.
 
         Args:
             response:   The cleaned LLM response text.
             latency_ms: Wall-clock time spent, in milliseconds.
+            tokens_used: Token count from the client's usage payload (Phase 10.2).
 
         Returns:
             A validated :class:`AgentTurn`, or an error turn when the response
@@ -303,7 +317,7 @@ class BaseAgent(ABC):
             agent_type=self.agent_type,
             output=data,
             latency_ms=round(latency_ms, 2),
-            tokens_used=0,
+            tokens_used=tokens_used,
         )
 
     def _error_turn(self, message: str, latency_ms: float = 0.0) -> AgentTurn:
@@ -350,3 +364,65 @@ class BaseAgent(ABC):
             extra={"action": "sanitized_and_continued"},
         )
         get_audit_logger().log(event)
+
+    def _scan_output(self, session: Session, raw: str, tokens_used: int) -> None:
+        """Phase 10 output defenses: jailbreak scan + anomaly tracking.
+
+        Runs the advisory scans on the raw model response — jailbreak/refusal
+        echoes (:func:`scan_llm_output`) and the per-agent response-length/
+        token-usage anomaly detector. Anything found is written to the audit
+        trail as a warning; nothing here blocks, because schema validation is
+        the gate that rejects bad output.
+
+        Args:
+            session:    The session being analyzed.
+            raw:        The raw (uncleaned) LLM response.
+            tokens_used: Token count reported by the LLM client.
+        """
+        flags = scan_llm_output(raw)
+        try:
+            flags.extend(
+                get_anomaly_detector().record(self.agent_type.value, len(raw), tokens_used)
+            )
+        except Exception:
+            _logger.debug("Anomaly tracking failed", exc_info=True)
+        if not flags:
+            return
+        _logger.warning(
+            "Agent %s returned suspicious output (session %s): %s",
+            self.agent_type.value,
+            session.session_id,
+            ", ".join(flags),
+        )
+        event = TraceEvent(
+            event_type="output_suspicious",
+            agent_name=self.agent_type.value,
+            status="warning",
+            session_id=session.session_id,
+            extra={"flags": flags},
+        )
+        get_audit_logger().log(event)
+
+    @staticmethod
+    def _reject_unknown_keys(
+        data: dict[str, Any], allowed: frozenset[str]
+    ) -> tuple[bool, str]:
+        """Reject output keys outside an agent's strict schema (Phase 10.2).
+
+        The AI-poisoning defense: a model that slips an extra key into its JSON
+        (``{"compute": {...}, "budget_status": "OVER"}``) is either
+        hallucinating or echoing an injected instruction. Only the keys the
+        agent's contract defines are accepted.
+
+        Args:
+            data:    The parsed output dict.
+            allowed: The exact set of keys the agent may emit.
+
+        Returns:
+            ``(True, "")`` when every key is allowed, else
+            ``(False, "unexpected key(s): ...")``.
+        """
+        unknown = sorted(set(data) - allowed)
+        if unknown:
+            return False, f"unexpected key(s): {', '.join(unknown)}"
+        return True, ""

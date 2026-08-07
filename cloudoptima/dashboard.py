@@ -1,20 +1,19 @@
-"""CloudOptima Streamlit dashboard (Phase 7).
+"""Streamlit dashboard (Phase 7).
 
-The user describes their infrastructure needs in a form; the orchestrator runs
-the five-agent pipeline; the results render across four tabs (Overview,
-Agents, Conflicts, Artifacts) with downloadable artifacts.
+The user fills in a form, the orchestrator runs the five-agent pipeline, and
+the results land across four tabs (Overview, Agents, Conflicts, Artifacts)
+with downloadable artifacts.
 
 Design notes:
-- **Real progress, never faked.** The orchestrator runs in a background thread;
-  the main thread polls ``session.agent_turns`` and advances the progress bar
-  only when a turn is actually appended. No fabricated progress.
-- **Security first.** Every user-supplied value passes through
-  :func:`clean_input` inside :func:`build_session`; every LLM-produced string
-  passes through :func:`clean_output` before display. ``unsafe_allow_html`` is
-  never used anywhere.
-- **Testable core.** All pure logic (session building, severity mapping, text
-  formatting) lives in module functions that do not touch Streamlit, so they
-  are unit-testable without a Streamlit runtime.
+- **Progress is real, never faked.** The orchestrator runs on a background
+  thread; the main thread polls ``session.agent_turns`` and only moves the
+  bar when a turn actually completes.
+- **Security first.** Every user value passes through :func:`clean_input` in
+  :func:`build_session`; every LLM-produced string through
+  :func:`clean_output` before display. ``unsafe_allow_html`` is never used.
+- **Testable core.** Pure logic (session building, severity mapping, text
+  formatting) lives in module-level functions that never touch Streamlit, so
+  they're unit-testable without a Streamlit runtime.
 
 Run with:
     streamlit run cloudoptima/dashboard.py
@@ -22,6 +21,7 @@ Run with:
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from typing import Any, Final
@@ -45,6 +45,7 @@ from cloudoptima.models import (
     Session,
     WorkloadType,
 )
+from cloudoptima.pricing import extract_services, live_prices
 from cloudoptima.sanitize import clean_input, clean_output
 
 # ── Constants ───────────────────────────────────────────────────────────
@@ -71,6 +72,11 @@ _SEVERITY_LABELS: Final[dict[str, str]] = {
 _BUDGET_MIN: Final[int] = 100
 _BUDGET_MAX: Final[int] = 100_000
 _BUDGET_DEFAULT: Final[int] = 5_000
+
+_PRICING_SOURCE_LABELS: Final[dict[str, str]] = {
+    "live": "🟢 Azure Retail API",
+    "static": "🟡 Static catalog",
+}
 
 
 # ── Pure helpers (unit-testable, no Streamlit calls) ────────────────────
@@ -109,9 +115,8 @@ def build_session(
 ) -> Session:
     """Build a validated :class:`Session` from raw form values.
 
-    Every user-supplied string is cleaned with :func:`clean_input` before it
-    enters the model, so hostile input (XSS, SQL, null bytes) never reaches the
-    agents or the dashboard.
+    Every user-supplied string is cleaned with :func:`clean_input` first, so
+    hostile input (XSS, SQL, null bytes) never reaches the agents or the UI.
     """
     budget_value: float | None = None
     if budget is not None and budget > 0:
@@ -166,6 +171,35 @@ def format_currency(value: float | int | None) -> str:
 def artifact_bytes(artifact: Artifact) -> bytes:
     """UTF-8 bytes of an artifact's content for download buttons."""
     return artifact.content.encode("utf-8")
+
+
+def live_pricing_rows(session: Session) -> tuple[list[dict[str, Any]], str]:
+    """Real Azure Retail Prices rows for the services a design mentions.
+
+    Scans the user's services text plus the architect's validated JSON for
+    known Azure services and prices each against the live Retail Prices API
+    (static catalog as the offline fallback). Pure — no Streamlit calls, so
+    it is unit-testable.
+
+    Args:
+        session: A completed (or running) analysis session.
+
+    Returns:
+        ``(rows, region)`` where each row is
+        ``{"service", "price", "source"}`` and ``region`` is the ARM region
+        the prices were fetched for.
+    """
+    texts: list[str | None] = [session.services, session.user_prompt]
+    for turn in session.agent_turns:
+        if turn.agent_type == AgentType.ARCHITECT and "error" not in turn.output:
+            try:
+                texts.append(json.dumps(turn.output))
+            except (TypeError, ValueError):  # pragma: no cover - defensive
+                texts.append(None)
+            break
+    names = extract_services(*texts)
+    region = str(getattr(session.region, "value", session.region) or "uaenorth")
+    return live_prices(names, region), region
 
 
 def session_status_badge(session: Session) -> str:
@@ -392,7 +426,10 @@ def _render_progress() -> None:
     if session.status == "completed":
         status_box.success(f"Analysis complete in {_total_latency_ms(session):,.0f} ms.")
     else:
-        status_box.error("Analysis failed or was interrupted — see the Agents tab.")
+        message = session.error_message or (
+            "Analysis failed or was interrupted — see the Agents tab."
+        )
+        status_box.error(clean_output(message))
 
     st.session_state.running = False
     st.session_state.thread = None
@@ -417,6 +454,8 @@ def _render_overview_tab(session: Session) -> None:
     st.write(f"Status: {session_status_badge(session)}")
     st.write(f"Budget: **{format_currency(session.budget)}**")
 
+    _render_live_pricing(session)
+
     st.markdown("### Latency per agent (ms)")
     if session.agent_turns:
         chart = pd.DataFrame(
@@ -437,6 +476,36 @@ def _render_overview_tab(session: Session) -> None:
         overridden = judge.output.get("overridden_agents", [])
         overridden_text = ", ".join(str(a) for a in overridden) if overridden else "none"
         st.write(f"**Overridden agents:** {overridden_text}")
+
+
+def _render_live_pricing(session: Session) -> None:
+    """Render the live Azure Retail Prices panel in the Overview tab."""
+    st.markdown("### 💵 Live Azure pricing")
+    rows, region = live_pricing_rows(session)
+    if not rows:
+        st.caption(
+            f"No Azure services matched in the design (region {region}) — "
+            "nothing to price."
+        )
+        return
+    frame = pd.DataFrame(rows)
+    frame["price"] = frame["price"].map(lambda p: f"${float(p):,.2f}")
+    frame = frame.rename(
+        columns={
+            "service": "Service",
+            "price": "List price (USD)",
+            "unit": "Unit",
+            "source": "Source",
+        }
+    )
+    frame["Source"] = frame["Source"].map(_PRICING_SOURCE_LABELS)
+    st.dataframe(frame, use_container_width=True, hide_index=True)
+    st.caption(
+        "Real list prices from the Azure Retail Prices API (free, no auth, "
+        "cached 1 hour) — the unit varies by service (per hour, per GB-Mo, "
+        "per month). The static catalog appears only when a service is "
+        "missing or the API is offline."
+    )
 
 
 def _render_agents_tab(session: Session) -> None:

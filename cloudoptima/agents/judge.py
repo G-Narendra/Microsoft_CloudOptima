@@ -21,6 +21,17 @@ from cloudoptima.models import AgentType, Session
 # substrings (lowercased for the match) so the check is simple and auditable.
 _BANNED_PHRASES: Final[tuple[str, ...]] = ("disable_encryption", "disable_mfa")
 
+# Phase 10.2: the judge's contract is exactly these keys.
+_ALLOWED_KEYS: Final[frozenset[str]] = frozenset(
+    {"arbitration", "final_recommendation", "overridden_agents"}
+)
+_ALLOWED_ARB_KEYS: Final[frozenset[str]] = frozenset(
+    {"conflicts_detected", "conflict_summaries"}
+)
+_ALLOWED_SUMMARY_KEYS: Final[frozenset[str]] = frozenset(
+    {"dimension", "agents_involved", "issue", "resolution"}
+)
+
 _JUDGE_SYSTEM_PROMPT = """\
 You are an impartial judge overseeing a panel of four cloud expert agents.
 Review their outputs and the detected conflicts, then arbitrate. You may
@@ -86,9 +97,15 @@ class JudgeAgent(BaseAgent):
 
     def _validate_output(self, data: dict[str, Any]) -> tuple[bool, str]:
         """Require a well-formed arbitration and a safe final recommendation."""
+        ok, message = self._reject_unknown_keys(data, _ALLOWED_KEYS)
+        if not ok:
+            return False, message
         arbitration = data.get("arbitration")
         if not isinstance(arbitration, dict):
             return False, "'arbitration' must be an object"
+        ok, message = self._reject_unknown_keys(arbitration, _ALLOWED_ARB_KEYS)
+        if not ok:
+            return False, f"arbitration has {message}"
 
         count = arbitration.get("conflicts_detected")
         if not isinstance(count, int) or isinstance(count, bool) or count < 0:
@@ -100,6 +117,9 @@ class JudgeAgent(BaseAgent):
         for item in summaries:
             if not isinstance(item, dict):
                 return False, "each conflict summary must be an object"
+            ok, message = self._reject_unknown_keys(item, _ALLOWED_SUMMARY_KEYS)
+            if not ok:
+                return False, f"conflict summary has {message}"
             for key in ("dimension", "issue", "resolution"):
                 if not isinstance(item.get(key), str):
                     return False, f"each conflict summary must have a string '{key}'"
@@ -109,14 +129,11 @@ class JudgeAgent(BaseAgent):
         final = data.get("final_recommendation")
         if not isinstance(final, str):
             return False, "'final_recommendation' must be a string"
-        # Normalize so spacing/punctuation variants ("disable encryption",
-        # "disable-mfa", "disable\nencryption") collapse onto the banned
-        # substrings and cannot dodge the check.
+        # Normalize both sides so spacing/punctuation tricks ("disable
+        # encryption", "disable-mfa", "disable\nencryption") all collapse
+        # onto the same string and can't dodge the check.
         normalized = re.sub(r"[_\-\s]", "", final.lower())
         for phrase in _BANNED_PHRASES:
-            # Normalize the phrase the same way, so "disable encryption" and
-            # "disable_encryption" both collapse onto "disableencryption" and
-            # cannot dodge the check via spacing or punctuation.
             normalized_phrase = re.sub(r"[_\-\s]", "", phrase.lower())
             if normalized_phrase in normalized:
                 return False, f"'final_recommendation' must not suggest '{phrase}'"

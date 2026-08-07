@@ -28,7 +28,7 @@ class AgentType(StrEnum):
 
 
 class WorkloadType(StrEnum):
-    """Target workload characteristic profiles."""
+    """How the workload hits the infrastructure (spiky, steady, continuous)."""
 
     REALTIME = "realtime"
     BATCH = "batch"
@@ -37,7 +37,7 @@ class WorkloadType(StrEnum):
 
 
 class DeploymentScale(StrEnum):
-    """Scale categories for target infrastructure."""
+    """How big the deployment is — drives sizing and cost assumptions."""
 
     SMALL = "small"
     MEDIUM = "medium"
@@ -46,7 +46,7 @@ class DeploymentScale(StrEnum):
 
 
 class AzureRegion(StrEnum):
-    """Major Azure deployment regions."""
+    """Regions we let users pick from (data residency matters for compliance)."""
 
     UAE_NORTH = "uaenorth"
     EAST_US = "eastus"
@@ -68,7 +68,7 @@ class AzureRegion(StrEnum):
 
 
 class ComplianceFramework(StrEnum):
-    """Supported regulatory and compliance frameworks."""
+    """Regulatory frameworks the compliance agent can be asked to check."""
 
     PDPL = "pdpl"
     HIPAA = "hipaa"
@@ -81,7 +81,7 @@ class ComplianceFramework(StrEnum):
 
 
 def sanitize_null_bytes(val: Any) -> Any:
-    """Recursively strip null bytes (\x00) from string values in strings, dicts, and lists."""
+    """Recursively remove null bytes (\x00) from strings inside dicts and lists."""
     if isinstance(val, str):
         return val.replace("\x00", "")
     elif isinstance(val, dict):
@@ -118,15 +118,15 @@ class SanitizedBaseModel(BaseModel):
 
 
 class AgentTurn(SanitizedBaseModel):
-    """Record of a single agent's analysis or proposal turn."""
+    """One agent's contribution to a session — its output, timing, and token use."""
 
     agent_type: AgentType = Field(description="The agent role performing this turn")
     output: dict[str, Any] = Field(
         default_factory=dict,
         description="Structured output dictionary produced by the agent",
     )
-    latency_ms: float = Field(default=0.0, ge=0.0, description="Execution latency in milliseconds")
-    tokens_used: int = Field(default=0, ge=0, description="Total tokens consumed during turn")
+    latency_ms: float = Field(default=0.0, ge=0.0, description="Wall-clock time the turn took")
+    tokens_used: int = Field(default=0, ge=0, description="Tokens consumed by this turn")
     timestamp: datetime = Field(
         default_factory=lambda: datetime.now(UTC),
         description="UTC timestamp of when the turn completed",
@@ -134,7 +134,7 @@ class AgentTurn(SanitizedBaseModel):
 
 
 class Conflict(SanitizedBaseModel):
-    """Disagreement between two or more agents, with its issue description and resolution."""
+    """Two agents disagreeing — what about, who's involved, and how it got resolved."""
 
     dimension: str = Field(
         default="",
@@ -143,8 +143,8 @@ class Conflict(SanitizedBaseModel):
     agents: list[AgentType] = Field(
         description="List of agents involved in the conflict (minimum 2)"
     )
-    issue: str = Field(description="Description of the disagreement issue")
-    resolution: str = Field(description="Resolution provided by Judge agent")
+    issue: str = Field(description="What the agents disagree on")
+    resolution: str = Field(description="How the Judge settled it (empty until arbitration)")
 
     @field_validator("agents")
     @classmethod
@@ -156,59 +156,67 @@ class Conflict(SanitizedBaseModel):
 
 
 class Artifact(SanitizedBaseModel):
-    """Generated architecture output file (e.g. IaC Bicep, Terraform, Cost Report)."""
+    """A generated deliverable — Bicep template, cost report, or summary doc."""
 
     artifact_id: str = Field(
         default_factory=lambda: str(uuid.uuid4()),
         description="Unique identifier for the artifact",
     )
-    name: str = Field(description="Filename or title of the artifact")
-    type: str = Field(description="Type of artifact (e.g. iac_bicep, cost_report, diagram)")
+    name: str = Field(description="Filename of the artifact (e.g. architecture.bicep)")
+    type: str = Field(
+        description="Artifact kind: iac_bicep, cost_forecast, compliance_report, etc."
+    )
     format: str = Field(
-        default="text", description="Content format (e.g. bicep, terraform, json, text)"
+        default="text",
+        description="Content format for syntax highlighting: bicep, json, markdown",
     )
     content: str = Field(description="Raw text content of the generated artifact")
     description: str = Field(default="", description="Summary description of the artifact")
 
 
 class Session(SanitizedBaseModel):
-    """Complete session capturing user inputs, agent turns, conflicts, and generated artifacts."""
+    """Everything about one analysis: the user's inputs and everything the pipeline produced."""
 
     session_id: str = Field(
         default_factory=lambda: str(uuid.uuid4()),
         description="Unique session identifier UUID",
     )
-    project_name: str = Field(description="User-defined project or workload name")
+    project_name: str = Field(description="User-provided project or workload name")
     workload_type: WorkloadType = Field(
-        default=WorkloadType.MIXED, description="Category of workload"
+        default=WorkloadType.MIXED, description="Kind of workload being designed for"
     )
     scale: DeploymentScale = Field(
-        default=DeploymentScale.MEDIUM, description="Infrastructure deployment scale"
+        default=DeploymentScale.MEDIUM, description="How big the deployment is"
     )
     region: AzureRegion = Field(
-        default=AzureRegion.UAE_NORTH, description="Primary Azure target region"
+        default=AzureRegion.UAE_NORTH, description="Primary Azure region to target"
     )
     compliance_frameworks: list[ComplianceFramework] = Field(
-        default_factory=list, description="Target compliance standards"
+        default_factory=list, description="Regulations to check against"
     )
     budget: float | None = Field(
-        default=None, description="User-specified monthly budget in USD (None if not provided)"
+        default=None,
+        description="Monthly budget in USD — None means the user didn't set a cap",
     )
     services: str = Field(
-        default="", description="User-described services/stack (comma-separated text)"
+        default="", description="Services/stack the user described (free text)"
     )
     status: str = Field(
-        default="pending", description="Pipeline status: pending, running, completed, failed"
+        default="pending", description="Lifecycle: pending, running, completed, failed"
     )
-    user_prompt: str = Field(default="", description="Original user prompt or requirements text")
+    error_message: str = Field(
+        default="",
+        description="Human-readable failure or rate-limit reason (empty on success)",
+    )
+    user_prompt: str = Field(default="", description="The user's requirements text")
     agent_turns: list[AgentTurn] = Field(
-        default_factory=list, description="Ordered list of agent turns"
+        default_factory=list, description="Agent turns in pipeline order"
     )
     conflicts: list[Conflict] = Field(
-        default_factory=list, description="List of detected and resolved conflicts"
+        default_factory=list, description="Disagreements found (and their resolutions)"
     )
     artifacts: list[Artifact] = Field(
-        default_factory=list, description="Generated IaC and documentation artifacts"
+        default_factory=list, description="Generated deliverables"
     )
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC),

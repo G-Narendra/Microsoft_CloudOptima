@@ -14,7 +14,7 @@ Validation is strict about two things:
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Final
 
 from cloudoptima.agent_base import BaseAgent
 from cloudoptima.models import AgentType, Session
@@ -22,6 +22,14 @@ from cloudoptima.sanitize import scan_for_malware_in_iac
 
 # The only risk ratings the model may report.
 _RISK_RATINGS: frozenset[str] = frozenset({"LOW", "MEDIUM", "HIGH", "CRITICAL"})
+
+# Phase 10.2: the security engineer's contract is exactly these keys.
+_ALLOWED_KEYS: Final[frozenset[str]] = frozenset(
+    {"overall_risk_rating", "findings", "recommendations"}
+)
+_ALLOWED_FINDING_KEYS: Final[frozenset[str]] = frozenset(
+    {"control", "status", "details", "cvss_score"}
+)
 
 _SECURITY_SYSTEM_PROMPT = """\
 You are a cloud security engineer. Assess the proposed architecture for
@@ -69,6 +77,9 @@ class SecurityEngineerAgent(BaseAgent):
 
     def _validate_output(self, data: dict[str, Any]) -> tuple[bool, str]:
         """Require a valid risk rating and findings that carry no executable code."""
+        ok, message = self._reject_unknown_keys(data, _ALLOWED_KEYS)
+        if not ok:
+            return False, message
         rating = data.get("overall_risk_rating")
         if rating not in _RISK_RATINGS:
             return False, (
@@ -82,6 +93,9 @@ class SecurityEngineerAgent(BaseAgent):
         for item in findings:
             if not isinstance(item, dict):
                 return False, "each finding must be an object"
+            ok, message = self._reject_unknown_keys(item, _ALLOWED_FINDING_KEYS)
+            if not ok:
+                return False, f"finding has {message}"
             for key in ("control", "status", "details"):
                 if not isinstance(item.get(key), str):
                     return False, f"each finding must have a string '{key}'"

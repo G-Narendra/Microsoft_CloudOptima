@@ -11,10 +11,13 @@ from pydantic import SecretStr
 
 from cloudoptima.config import Settings
 from cloudoptima.llm_client import (
+    AnthropicClient,
     AzureClient,
     BaseLLMClient,
+    GoogleClient,
     MockClient,
     NvidiaClient,
+    OpenAIClient,
     _strip_control_chars,
     create_llm_client,
     generate_with_retry,
@@ -271,6 +274,188 @@ def test_azure_client_empty_response() -> None:
         result = client.generate("test prompt")
 
     assert result == ""
+
+
+# ── OpenAI (direct) Client Tests ────────────────────────────────────────────
+
+
+def test_openai_client_missing_key() -> None:
+    """OpenAIClient raises ValueError when API key is empty."""
+    settings = Settings(llm_provider="mock", openai_api_key=SecretStr(""))
+    with pytest.raises(ValueError, match="openai_api_key is required"):
+        OpenAIClient(settings)
+
+
+def test_openai_client_generate() -> None:
+    """OpenAIClient calls the openai SDK and returns content."""
+    settings = Settings(llm_provider="mock", openai_api_key=SecretStr("sk-openai-key"))
+
+    with patch("cloudoptima.llm_client.openai.OpenAI") as mock_openai_cls:
+        mock_openai_instance = MagicMock()
+        mock_openai_cls.return_value = mock_openai_instance
+
+        mock_message = MagicMock()
+        mock_message.content = '{"result": "openai_ok"}'
+        mock_choice = MagicMock()
+        mock_choice.message = mock_message
+        mock_completion = MagicMock()
+        mock_completion.choices = [mock_choice]
+        mock_openai_instance.chat.completions.create.return_value = mock_completion
+
+        client = OpenAIClient(settings)
+        result = client.generate("test prompt", "system prompt")
+
+        call_args = mock_openai_instance.chat.completions.create.call_args
+        assert call_args.kwargs.get("response_format") == {"type": "json_object"}
+
+    assert result == '{"result": "openai_ok"}'
+
+
+def test_openai_client_uses_json_mode_without_system_prompt() -> None:
+    settings = Settings(llm_provider="mock", openai_api_key=SecretStr("sk-openai-key"))
+
+    with patch("cloudoptima.llm_client.openai.OpenAI") as mock_openai_cls:
+        mock_openai_instance = MagicMock()
+        mock_openai_cls.return_value = mock_openai_instance
+
+        mock_message = MagicMock()
+        mock_message.content = "{}"
+        mock_choice = MagicMock()
+        mock_choice.message = mock_message
+        mock_completion = MagicMock()
+        mock_completion.choices = [mock_choice]
+        mock_openai_instance.chat.completions.create.return_value = mock_completion
+
+        client = OpenAIClient(settings)
+        client.generate("test prompt")  # no system_prompt
+
+        call_args = mock_openai_instance.chat.completions.create.call_args
+        messages = call_args.kwargs.get("messages")
+        assert messages[0]["role"] == "system"
+        assert "JSON" in messages[0]["content"]
+
+
+# ── Anthropic Client Tests ───────────────────────────────────────────────────
+
+
+def test_anthropic_client_missing_key() -> None:
+    settings = Settings(llm_provider="mock", anthropic_api_key=SecretStr(""))
+    with pytest.raises(ValueError, match="anthropic_api_key is required"):
+        AnthropicClient(settings)
+
+
+def test_anthropic_client_generate() -> None:
+    settings = Settings(llm_provider="mock", anthropic_api_key=SecretStr("sk-ant-test"))
+    client = AnthropicClient(settings)
+
+    mock_response_data = {
+        "content": [{"type": "text", "text": '{"result": "anthropic_ok"}'}],
+        "usage": {"input_tokens": 12, "output_tokens": 30},
+    }
+
+    with patch("cloudoptima.llm_client.httpx.Client") as mock_httpx:
+        mock_http_client = MagicMock()
+        mock_httpx.return_value.__enter__ = MagicMock(return_value=mock_http_client)
+        mock_httpx.return_value.__exit__ = MagicMock(return_value=False)
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = mock_response_data
+        mock_http_client.post.return_value = mock_resp
+
+        result = client.generate("test prompt", "system prompt")
+
+    assert result == '{"result": "anthropic_ok"}'
+    assert client.last_tokens_used == 42
+
+
+def test_anthropic_client_empty_response() -> None:
+    settings = Settings(llm_provider="mock", anthropic_api_key=SecretStr("sk-ant-test"))
+    client = AnthropicClient(settings)
+
+    with patch("cloudoptima.llm_client.httpx.Client") as mock_httpx:
+        mock_http_client = MagicMock()
+        mock_httpx.return_value.__enter__ = MagicMock(return_value=mock_http_client)
+        mock_httpx.return_value.__exit__ = MagicMock(return_value=False)
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"content": [{"type": "text", "text": ""}]}
+        mock_http_client.post.return_value = mock_resp
+
+        result = client.generate("test prompt")
+
+    assert result == ""
+
+
+# ── Google Gemini Client Tests ───────────────────────────────────────────────
+
+
+def test_google_client_missing_key() -> None:
+    settings = Settings(llm_provider="mock", google_api_key=SecretStr(""))
+    with pytest.raises(ValueError, match="google_api_key is required"):
+        GoogleClient(settings)
+
+
+def test_google_client_generate() -> None:
+    settings = Settings(llm_provider="mock", google_api_key=SecretStr("AI-google-test"))
+    client = GoogleClient(settings)
+
+    mock_response_data = {
+        "candidates": [{"content": {"parts": [{"text": '{"result": "google_ok"}'}]}}],
+        "usageMetadata": {"totalTokenCount": 77},
+    }
+
+    with patch("cloudoptima.llm_client.httpx.Client") as mock_httpx:
+        mock_http_client = MagicMock()
+        mock_httpx.return_value.__enter__ = MagicMock(return_value=mock_http_client)
+        mock_httpx.return_value.__exit__ = MagicMock(return_value=False)
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = mock_response_data
+        mock_http_client.post.return_value = mock_resp
+
+        result = client.generate("test prompt", "system prompt")
+
+    assert result == '{"result": "google_ok"}'
+    assert client.last_tokens_used == 77
+
+
+def test_google_client_uses_header_not_url_key() -> None:
+    """The Gemini key rides in a header so it never leaks into access logs."""
+    settings = Settings(llm_provider="mock", google_api_key=SecretStr("AI-google-test"))
+    client = GoogleClient(settings)
+
+    with patch("cloudoptima.llm_client.httpx.Client") as mock_httpx:
+        mock_http_client = MagicMock()
+        mock_httpx.return_value.__enter__ = MagicMock(return_value=mock_http_client)
+        mock_httpx.return_value.__exit__ = MagicMock(return_value=False)
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}
+        mock_http_client.post.return_value = mock_resp
+
+        client.generate("test prompt")
+
+    called_url = mock_http_client.post.call_args[0][0]
+    assert "key=" not in called_url
+
+
+# ── Factory with new providers ───────────────────────────────────────────────
+
+
+def test_factory_openai() -> None:
+    settings = Settings(llm_provider="openai", openai_api_key=SecretStr("sk-openai"))
+    client = create_llm_client(settings)
+    assert isinstance(client, OpenAIClient)
+
+
+def test_factory_anthropic() -> None:
+    settings = Settings(llm_provider="anthropic", anthropic_api_key=SecretStr("sk-ant"))
+    client = create_llm_client(settings)
+    assert isinstance(client, AnthropicClient)
+
+
+def test_factory_google() -> None:
+    settings = Settings(llm_provider="google", google_api_key=SecretStr("AI-g"))
+    client = create_llm_client(settings)
+    assert isinstance(client, GoogleClient)
 
 
 def test_azure_client_no_system_prompt() -> None:

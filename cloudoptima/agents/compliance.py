@@ -1,15 +1,20 @@
-"""ComplianceOfficerAgent — checks the architecture against 21 hardcoded rules.
+"""ComplianceOfficerAgent — checks the design against the 21 rules + RAG.
 
-The compliance officer assesses the proposed architecture against the target
-regulatory frameworks and the **21 immutable compliance rules** below.
+The compliance officer grades the proposed architecture against the target
+regulatory frameworks and the **21 immutable compliance rules** in
+:mod:`cloudoptima.compliance.rules`.
 
-The rules are hardcoded three times on purpose (a v1 lesson):
+Those rules are enforced three times on purpose (a v1 lesson):
 
-1. Here, as the ``COMPLIANCE_RULES`` constant — the single source of truth.
-2. In the system prompt, **explicitly listed** (never referenced by name) so the
-   model cannot invent or silently drop rules.
-3. In validation — every ``rule_id`` in the output must match one of the 21,
-   and if any rule is not PASS the overall status must be NEEDS_WORK.
+1. The module is the single immutable source of truth (Phase 8.1).
+2. The system prompt lists them **explicitly** (never by reference), so the
+   model can't invent or quietly drop a rule.
+3. Validation checks every ``rule_id`` in the output against the 21, and
+   demands NEEDS_WORK overall whenever any rule isn't PASS.
+
+For framework-specific edge cases the prompt is enriched with RAG passages
+from :mod:`cloudoptima.compliance.rag` (Phase 8.2) — treated as untrusted
+and cleaned before they enter the prompt.
 """
 
 from __future__ import annotations
@@ -17,63 +22,26 @@ from __future__ import annotations
 from typing import Any, Final
 
 from cloudoptima.agent_base import BaseAgent
+from cloudoptima.compliance.rag import query_rag
+from cloudoptima.compliance.rules import RULE_IDS, render_rules_text
 from cloudoptima.models import AgentType, Session
 
-# ── The 21 immutable compliance rules (id, name, description) ────────────────
-COMPLIANCE_RULES: Final[tuple[dict[str, str], ...]] = (
-    {"id": "01", "name": "Data Residency",
-     "description": "Customer data stored within approved geography"},
-    {"id": "02", "name": "Encryption at Rest",
-     "description": "All storage encrypted with AES-256"},
-    {"id": "03", "name": "Encryption in Transit",
-     "description": "TLS 1.2+ for all data in motion"},
-    {"id": "04", "name": "Access Control",
-     "description": "RBAC with least-privilege principle"},
-    {"id": "05", "name": "Audit Logging",
-     "description": "All access logged and monitored"},
-    {"id": "06", "name": "Data Retention",
-     "description": "Define and enforce retention policies"},
-    {"id": "07", "name": "Right to Deletion",
-     "description": "Users can request data deletion"},
-    {"id": "08", "name": "Breach Notification",
-     "description": "Notify authorities within 72 hours"},
-    {"id": "09", "name": "Incident Response",
-     "description": "Documented incident response plan"},
-    {"id": "10", "name": "Vendor Assessment",
-     "description": "Third-party vendors must meet standards"},
-    {"id": "11", "name": "Data Classification",
-     "description": "Classify data by sensitivity"},
-    {"id": "12", "name": "Backup & Recovery",
-     "description": "Regular backups with DR testing"},
-    {"id": "13", "name": "Business Continuity",
-     "description": "Documented BCP"},
-    {"id": "14", "name": "Network Security",
-     "description": "Segmentation, firewalls, DDoS protection"},
-    {"id": "15", "name": "Patch Management",
-     "description": "Regular security patching"},
-    {"id": "16", "name": "Identity Management",
-     "description": "MFA for all privileged access"},
-    {"id": "17", "name": "Key Management",
-     "description": "Managed HSM for encryption keys"},
-    {"id": "18", "name": "Secure Development",
-     "description": "SDLC with security reviews"},
-    {"id": "19", "name": "Vulnerability Scanning",
-     "description": "Regular scans with remediation SLAs"},
-    {"id": "20", "name": "Staff Training",
-     "description": "Security awareness training"},
-    {"id": "21", "name": "Third-party Data",
-     "description": "Agreements with data processors"},
-)
-
-_VALID_RULE_IDS: frozenset[str] = frozenset(rule["id"] for rule in COMPLIANCE_RULES)
+_VALID_RULE_IDS: frozenset[str] = RULE_IDS
 _RULE_STATUSES: frozenset[str] = frozenset({"PASS", "FAIL", "WARNING", "CONFIG_NEEDED"})
 _OVERALL_STATUSES: frozenset[str] = frozenset({"PASS", "NEEDS_WORK"})
 
-# The rules, rendered once for the system prompt. Kept in the exact order of
-# COMPLIANCE_RULES so the numbering cannot drift.
-_RULES_TEXT: Final[str] = "\n".join(
-    f"{rule['id']}. {rule['name']} — {rule['description']}" for rule in COMPLIANCE_RULES
+# Phase 10.2: the compliance officer's contract is exactly these keys.
+_ALLOWED_KEYS: frozenset[str] = frozenset(
+    {"framework", "overall_status", "rules", "remediation_steps"}
 )
+_ALLOWED_RULE_KEYS: frozenset[str] = frozenset({"rule_id", "rule_name", "status", "details"})
+
+# The rules, rendered once for the system prompt. Kept in the exact order of
+# the rules module so the numbering cannot drift.
+_RULES_TEXT: Final[str] = render_rules_text()
+
+# Maximum number of RAG passages injected into the prompt.
+_MAX_RAG_PASSAGES: Final[int] = 2
 
 _COMPLIANCE_SYSTEM_PROMPT = f"""\
 You are a compliance officer. Assess the proposed architecture against the
@@ -82,6 +50,10 @@ are hardcoded — you must never invent, drop, or modify a rule.
 
 THE 21 RULES:
 {_RULES_TEXT}
+
+If the prompt includes a "RELEVANT COMPLIANCE GUIDANCE" section, use it to
+inform your judgment on framework-specific edge cases, but the 21 rules above
+remain the authority.
 
 Return ONLY valid JSON with exactly this structure — no prose outside the JSON:
 
@@ -111,19 +83,32 @@ class ComplianceOfficerAgent(BaseAgent):
             str(getattr(framework, "value", framework))
             for framework in session.compliance_frameworks
         ) or "not specified"
-        return "\n".join(
-            [
-                self._wrap_field("PROJECT NAME", session.project_name),
-                self._wrap_field("AZURE REGION", getattr(session.region, "value", session.region)),
-                self._wrap_field("COMPLIANCE FRAMEWORKS", frameworks),
-                self._wrap_field("REQUIREMENTS", session.user_prompt),
-                "ARCHITECT DESIGN (trusted pipeline output):",
-                self._prior_turn_json(session, AgentType.ARCHITECT),
-            ]
-        )
+        sections = [
+            self._wrap_field("PROJECT NAME", session.project_name),
+            self._wrap_field("AZURE REGION", getattr(session.region, "value", session.region)),
+            self._wrap_field("COMPLIANCE FRAMEWORKS", frameworks),
+            self._wrap_field("REQUIREMENTS", session.user_prompt),
+            "ARCHITECT DESIGN (trusted pipeline output):",
+            self._prior_turn_json(session, AgentType.ARCHITECT),
+        ]
+
+        # Phase 8.2: enrich with framework-specific RAG guidance. Retrieved
+        # passages are already cleaned by query_rag (untrusted data).
+        for framework in frameworks.split(", "):
+            passages = query_rag(session.user_prompt or "compliance", framework, _MAX_RAG_PASSAGES)
+            if passages:
+                sections.append("RELEVANT COMPLIANCE GUIDANCE:")
+                for passage in passages:
+                    sections.append(f"- {passage}")
+                break  # one framework's guidance is enough for a focused prompt
+
+        return "\n".join(sections)
 
     def _validate_output(self, data: dict[str, Any]) -> tuple[bool, str]:
         """Require known rule IDs and an overall status consistent with the rules."""
+        ok, message = self._reject_unknown_keys(data, _ALLOWED_KEYS)
+        if not ok:
+            return False, message
         overall = data.get("overall_status")
         if overall not in _OVERALL_STATUSES:
             return False, (
@@ -139,6 +124,9 @@ class ComplianceOfficerAgent(BaseAgent):
         for item in rules:
             if not isinstance(item, dict):
                 return False, "each rule check must be an object"
+            ok, message = self._reject_unknown_keys(item, _ALLOWED_RULE_KEYS)
+            if not ok:
+                return False, f"rule check has {message}"
             rule_id = item.get("rule_id")
             if rule_id not in _VALID_RULE_IDS:
                 return False, (

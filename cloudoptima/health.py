@@ -1,11 +1,13 @@
-"""Health checks: decentralised registry pattern for system component monitoring.
+"""Health checks: a registry so any module can contribute a check.
 
-Architecture decisions:
-- Uses a Registry pattern — any module can register a check at import time.
-- check_all() iterates all registered checks and collects results.
-- overall_status() aggregates to "healthy" / "degraded" / "unhealthy".
-- Checks are plain callables — no base class needed (structural typing).
-- Pre-built checks: LLM ping, cache health, disk usage, memory pressure.
+Any module registers a check function at import time with
+:func:`register`; :func:`check_all` runs them all and collects results;
+:func:`overall_status` collapses them into ``healthy`` / ``degraded`` /
+``unhealthy``. Checks are plain callables returning ``(passed, detail)`` —
+no base class needed.
+
+Pre-built checks cover the LLM client, cache, disk, memory, Python version,
+and the audit log directory.
 
 Example:
     >>> from cloudoptima.health import register, check_all, overall_status
@@ -81,16 +83,16 @@ def list_checks() -> list[str]:
 def check_all(
     include: list[str] | None = None, exclude: list[str] | None = None
 ) -> dict[str, HealthEntry]:
-    """Run every registered health check and collect results.
+    """Run every registered check (or just the named ones) and collect results.
 
     Args:
         include: If set, only run checks whose names appear in this list.
         exclude: If set, skip checks whose names appear in this list.
 
     Returns:
-        Dict mapping check name → {"passed": bool, "detail": str, "timestamp": datetime}.
+        Mapping of check name → {"passed", "detail", "timestamp"}.
 
-    Never crashes — individual check failures are captured as results.
+    A check that raises is captured as a failed result — this never crashes.
     """
     results: dict[str, HealthEntry] = {}
     now = datetime.datetime.now(datetime.UTC)
@@ -118,15 +120,14 @@ def check_all(
 
 
 def overall_status(results: dict[str, HealthEntry] | None = None) -> str:
-    """Aggregate check results into a single status label.
+    """Collapse check results into one status label.
 
-    Rules:
-        - "healthy"    → all checks passed
-        - "degraded"   → some checks failed, some passed
-        - "unhealthy"  → all checks failed (or no checks registered)
+    - "healthy"    → everything passed
+    - "degraded"   → some passed, some failed
+    - "unhealthy"  → all failed, or nothing is registered
 
     Args:
-        results: Output from check_all(). If None, runs check_all() first.
+        results: Output from :func:`check_all`; runs it if ``None``.
 
     Returns:
         One of "healthy", "degraded", "unhealthy".

@@ -1,11 +1,11 @@
-"""Observability: structured tracing, append-only audit logging, and @trace decorator.
+"""Observability: structured tracing, append-only audit logs, and @trace.
 
-Architecture decisions:
-- Logs are written to a daily JSONL file under a configurable log_dir (default logs/).
-- Files are never modified after creation — strictly append-only.
-- Logs older than RETENTION_DAYS (90) are pruned on every write.
-- The @trace decorator auto-records every agent/function call with timing.
-- API keys, passwords, and raw secrets are NEVER written to logs.
+The design is deliberately simple:
+- Every event lands as one JSON line in a daily file under ``log_dir``
+  (default ``logs/``). Files are append-only — never rewritten.
+- Logs older than :data:`RETENTION_DAYS` (90) get pruned on each write.
+- The :func:`trace` decorator records timing around any function.
+- API keys, passwords, and raw secrets are never written to logs.
 
 Example:
     >>> from cloudoptima.observability import AuditLogger, TraceEvent, trace
@@ -48,16 +48,16 @@ JsonSerializable: TypeAlias = dict[str, Any] | list[Any] | str | int | float | b
 # ── TraceEvent ─────────────────────────────────────────────────────────
 @dataclass
 class TraceEvent:
-    """A single observability event — structured, timestamped, immutable.
+    """One observable event — typed, timestamped, immutable.
 
     Attributes:
-        event_type:  High-level category (e.g. "agent_call", "orchestrator_run", "cache_hit").
-        agent_name:  The component that produced this event (e.g. "Architect", "LLMCache").
-        latency_ms:  Elapsed wall-clock time in milliseconds. 0 if not applicable.
-        tokens_used: Token count consumed (0 if unknown or not applicable).
+        event_type:  Category (e.g. "agent_call", "orchestrator_run", "cache_hit").
+        agent_name:  What produced it (e.g. "Architect", "LLMCache").
+        latency_ms:  Wall-clock time in milliseconds; 0 when not applicable.
+        tokens_used: Tokens consumed; 0 when unknown.
         status:      Outcome — "success", "error", "warning", "rate_limited".
-        session_id:  Optional session this event belongs to.
-        extra:       Arbitrary JSON-serialisable metadata (never contains secrets).
+        session_id:  Session this event belongs to, when there is one.
+        extra:       Arbitrary JSON-serialisable metadata (never secrets).
     """
 
     event_type: str = "generic"
@@ -95,15 +95,14 @@ class TraceEvent:
 
 # ── AuditLogger — append-only JSONL ────────────────────────────────────
 class AuditLogger:
-    """Append-only daily-rotating JSONL audit log.
+    """Append-only daily JSONL audit log.
 
-    File layout:
+    Layout:
         logs/audit-2026-07-30.jsonl   (one JSON object per line)
 
-    Thread-safe (locking on write). Old logs are pruned automatically
-    after RETENTION_DAYS on every write.
-
-    Never crashes — errors are logged and swallowed so callers don't break.
+    Writes are lock-guarded and old files are pruned after
+    :data:`RETENTION_DAYS`. A logging failure never breaks the caller — it's
+    caught, logged, and the event is dropped.
     """
 
     def __init__(self, log_dir: str | Path = DEFAULT_LOG_DIR) -> None:
@@ -304,6 +303,122 @@ def trace(
         return wrapper  # type: ignore[return-value]
 
     return decorator
+
+
+# ── Anomaly detection (Phase 10.2) ─────────────────────────────────────
+
+
+@dataclass
+class _AnomalyBaseline:
+    """Per-agent rolling baselines (EWMA) for response length and tokens."""
+
+    length_ewma: float = 0.0
+    tokens_ewma: float = 0.0
+    samples: int = 0
+
+
+class AnomalyDetector:
+    """Flags unusually short/long responses and >50%% token drops (Phase 10.2).
+
+    Keeps an exponentially weighted moving average per agent type so baselines
+    adapt to model drift instead of going stale. No flags are raised during
+    the warm-up window (the first :attr:`WARMUP_SAMPLES` observations), so the
+    detector learns what "normal" looks like before it can cry wolf.
+
+    Thread-safe; this is a process-wide singleton shared by all agents.
+
+    Example:
+        >>> detector = AnomalyDetector()
+        >>> for _ in range(5):
+        ...     detector.record("architect", 1200, 400)
+        >>> detector.record("architect", 1200, 50)   # token collapse
+        ['token_usage_drop']
+    """
+
+    WARMUP_SAMPLES: Final[int] = 5
+    ALPHA: Final[float] = 0.3
+    # Checklist 10.2: "track token usage — if drops >50% below normal, flag".
+    TOKEN_DROP_FRACTION: Final[float] = 0.5
+    # "Track response length — if unusually short or long, flag".
+    LENGTH_LOW_FRACTION: Final[float] = 0.4
+    LENGTH_HIGH_FRACTION: Final[float] = 2.5
+
+    def __init__(self) -> None:
+        self._baselines: dict[str, _AnomalyBaseline] = {}
+        self._lock = threading.Lock()
+
+    def record(self, agent: str, response_length: int, tokens_used: int) -> list[str]:
+        """Feed one observation and return the anomaly flags it raises.
+
+        Args:
+            agent:          The agent type name (baseline is per agent).
+            response_length: Raw response length in characters.
+            tokens_used:     Token count reported by the LLM (0 when unknown).
+
+        Returns:
+            A list of flag names — ``"token_usage_drop"`` and/or
+            ``"response_length_anomaly"`` — empty when the observation is
+            within the normal band.
+        """
+        flags: list[str] = []
+        with self._lock:
+            base = self._baselines.setdefault(agent, _AnomalyBaseline())
+            if base.samples >= self.WARMUP_SAMPLES and base.length_ewma > 0:
+                if base.tokens_ewma > 0 and tokens_used < base.tokens_ewma * (
+                    1 - self.TOKEN_DROP_FRACTION
+                ):
+                    flags.append("token_usage_drop")
+                low = base.length_ewma * self.LENGTH_LOW_FRACTION
+                high = base.length_ewma * self.LENGTH_HIGH_FRACTION
+                if response_length < low or response_length > high:
+                    flags.append("response_length_anomaly")
+            self._update(base, response_length, tokens_used)
+        return flags
+
+    def baseline(self, agent: str) -> tuple[float, float]:
+        """Current ``(length, tokens)`` baseline for an agent, or ``(0.0, 0.0)``."""
+        with self._lock:
+            base = self._baselines.get(agent)
+            if base is None:
+                return 0.0, 0.0
+            return base.length_ewma, base.tokens_ewma
+
+    def reset(self) -> None:
+        """Clear all baselines (used between tests)."""
+        with self._lock:
+            self._baselines.clear()
+
+    @staticmethod
+    def _update(base: _AnomalyBaseline, response_length: int, tokens_used: int) -> None:
+        """Fold a new observation into the EWMA baseline."""
+        if base.samples == 0:
+            base.length_ewma = float(response_length)
+            base.tokens_ewma = float(tokens_used)
+        else:
+            base.length_ewma = (
+                AnomalyDetector.ALPHA * response_length
+                + (1 - AnomalyDetector.ALPHA) * base.length_ewma
+            )
+            base.tokens_ewma = (
+                AnomalyDetector.ALPHA * tokens_used
+                + (1 - AnomalyDetector.ALPHA) * base.tokens_ewma
+            )
+        base.samples += 1
+
+
+# ── Singleton anomaly detector ──────────────────────────────────────────
+_anomaly_detector: AnomalyDetector | None = None
+_anomaly_detector_lock = threading.Lock()
+
+
+def get_anomaly_detector() -> AnomalyDetector:
+    """Return the shared :class:`AnomalyDetector` (lazily initialised)."""
+    global _anomaly_detector
+    if _anomaly_detector is None:
+        with _anomaly_detector_lock:
+            if _anomaly_detector is None:
+                _anomaly_detector = AnomalyDetector()
+    return _anomaly_detector
 
 
 # ── Internal helpers ───────────────────────────────────────────────────

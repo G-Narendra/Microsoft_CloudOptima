@@ -1,9 +1,9 @@
-"""Application entry points for CloudOptima — wiring and CLI (Phase 6).
+"""Entry points: orchestrator wiring + a stdin-to-stdout CLI (Phase 6).
 
-Provides :func:`create_orchestrator` (wires the full pipeline from settings —
-the dashboard imports this) and :func:`main` (a CLI that reads a Session JSON
-object from stdin, runs the pipeline, and prints the updated session as JSON
-to stdout). The CLI never prints API keys or secrets; the session model only
+:func:`create_orchestrator` builds the full pipeline from settings (the
+streamlit dashboard imports it). :func:`main` is a tiny CLI: it reads a
+Session JSON object from stdin, runs the pipeline, and prints the updated
+session as JSON. Secrets never leave the process — the session model only
 carries user inputs and pipeline output.
 
 Usage:
@@ -22,6 +22,7 @@ from pydantic import ValidationError
 from cloudoptima.config import Settings
 from cloudoptima.models import Session
 from cloudoptima.orchestrator import Orchestrator
+from cloudoptima.sanitize import DEFAULT_MAX_LENGTH, clean_input
 
 CLI_USAGE: Final[str] = (
     "usage: echo '{\"project_name\": \"My App\", \"user_prompt\": \"...\"}' "
@@ -68,6 +69,12 @@ def main(argv: list[str] | None = None) -> int:
     settings = Settings()
     orchestrator = create_orchestrator(settings)
 
+    # Same first line of defense as the dashboard (build_session): clean every
+    # user-supplied string before it enters the model, so hostile input (XSS,
+    # SQL, null bytes) never survives into the session, the prompt, or the
+    # printed output.
+    payload = _sanitize_payload(payload)
+
     try:
         session = Session.model_validate(payload)
     except ValidationError as exc:
@@ -82,6 +89,34 @@ def main(argv: list[str] | None = None) -> int:
 
     print(result.model_dump_json(indent=2))
     return 0
+
+
+def _sanitize_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Run user-supplied text fields through :func:`clean_input`.
+
+    Mirrors the dashboard's ``build_session`` so the CLI and the UI enforce the
+    same input contract. Enum fields and ``budget`` are passed through
+    unchanged (pydantic validates their types).
+
+    Args:
+        payload: The parsed stdin session object.
+
+    Returns:
+        A new dict with the text fields cleaned (never raises).
+    """
+    cleaned = dict(payload)
+    # Same caps as the dashboard's build_session: project names are short,
+    # free-text fields allow the full default budget.
+    limits = {
+        "project_name": 120,
+        "services": DEFAULT_MAX_LENGTH,
+        "user_prompt": DEFAULT_MAX_LENGTH,
+    }
+    for field, max_length in limits.items():
+        value = cleaned.get(field)
+        if isinstance(value, str):
+            cleaned[field] = clean_input(value, max_length=max_length)
+    return cleaned
 
 
 def _configure_utf8_stdio() -> None:

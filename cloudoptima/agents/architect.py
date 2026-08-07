@@ -13,7 +13,7 @@ half-built design.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Final
 
 from cloudoptima.agent_base import BaseAgent
 from cloudoptima.models import Session
@@ -23,6 +23,10 @@ from cloudoptima.models import Session
 # prompt cannot drift apart.
 _REQUIRED_SECTIONS: tuple[str, ...] = ("compute", "storage", "networking", "data")
 _SECTION_KEYS: tuple[str, ...] = ("recommendation", "justification", "alternatives")
+
+# Phase 10.2: the architect's contract is exactly these keys — nothing else.
+_ALLOWED_KEYS: Final[frozenset[str]] = frozenset(_REQUIRED_SECTIONS)
+_ALLOWED_SECTION_KEYS: Final[frozenset[str]] = frozenset(_SECTION_KEYS)
 
 _ARCHITECT_SYSTEM_PROMPT = """\
 You are a senior cloud architect with deep Azure expertise. Given the user's
@@ -84,6 +88,9 @@ class ArchitectAgent(BaseAgent):
 
     def _validate_output(self, data: dict[str, Any]) -> tuple[bool, str]:
         """Require all four sections, each with recommendation/justification/alternatives."""
+        ok, message = self._reject_unknown_keys(data, _ALLOWED_KEYS)
+        if not ok:
+            return False, message
         missing_sections = [
             section
             for section in _REQUIRED_SECTIONS
@@ -93,6 +100,9 @@ class ArchitectAgent(BaseAgent):
             return False, f"missing or invalid section(s): {', '.join(missing_sections)}"
 
         for section in _REQUIRED_SECTIONS:
+            ok, message = self._reject_unknown_keys(data[section], _ALLOWED_SECTION_KEYS)
+            if not ok:
+                return False, f"'{section}' has {message}"
             for key in _SECTION_KEYS:
                 if key not in data[section]:
                     return False, f"'{section}' is missing '{key}'"

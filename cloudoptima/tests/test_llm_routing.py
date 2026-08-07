@@ -206,13 +206,74 @@ class TestCreateRoutedClient:
 
     def test_unknown_routing_provider_rejected_by_settings(self) -> None:
         with pytest.raises(Exception):
-            Settings(routing_enabled=True, routing_providers=["openai"])
+            Settings(routing_enabled=True, routing_providers=["bogus"])
 
     def test_comma_separated_providers_string_parsed(self) -> None:
         settings = Settings(
             routing_enabled=True,
             # cast: the comma string exercises the NoDecode parsing path, which
             # the annotated list[str] type cannot express statically.
-            routing_providers=cast(Any, "nvidia,azure"),
+            routing_providers=cast(Any, "openai,azure,anthropic,google,nvidia"),
         )
-        assert settings.routing_providers == ["nvidia", "azure"]
+        assert settings.routing_providers == [
+            "openai",
+            "azure",
+            "anthropic",
+            "google",
+            "nvidia",
+        ]
+
+    def test_all_phase76_providers_registered_when_credentials_present(self) -> None:
+        settings = Settings(
+            routing_enabled=True,
+            routing_providers=["openai", "anthropic", "google"],
+            openai_api_key=SecretStr("sk-openai"),
+            anthropic_api_key=SecretStr("sk-ant"),
+            google_api_key=SecretStr("AI-google"),
+        )
+        router = create_routed_client(settings)
+        providers = set(router.chosen_providers())
+        assert {"openai", "anthropic", "google"} <= providers
+
+    def test_failover_across_four_providers(self) -> None:
+        """Phase 7.6: kill the three cheapest providers, load lands on the 4th."""
+        clients: dict[tuple[str, str], BaseLLMClient] = {
+            ("nvidia", TIER_SMART): _FakeClient("nvidia", fail=True),
+            ("openai", TIER_SMART): _FakeClient("openai", fail=True),
+            ("azure", TIER_SMART): _FakeClient("azure", fail=True),
+            ("anthropic", TIER_SMART): _FakeClient("anthropic"),
+        }
+        models: dict[tuple[str, str], str] = {
+            ("nvidia", TIER_SMART): "meta/llama-3.3-70b-instruct",
+            ("openai", TIER_SMART): "gpt-4o-mini",
+            ("azure", TIER_SMART): "gpt-4o-mini",
+            ("anthropic", TIER_SMART): "claude-sonnet-4-20250514",
+        }
+        router = _build_router(clients, models)
+        result = router.generate("design a system", _ARCHITECT_PROMPT)
+        assert json.loads(result)["provider"] == "anthropic"
+
+    def test_spend_guard_with_real_prices(self) -> None:
+        """Phase 7.6: a tiny cap skips every paid provider and hits free Nvidia."""
+        nvidia = _FakeClient("nvidia")
+        azure = _FakeClient("azure")
+        openai = _FakeClient("openai")
+        clients: dict[tuple[str, str], BaseLLMClient] = {
+            ("nvidia", TIER_SMART): nvidia,
+            ("azure", TIER_SMART): azure,
+            ("openai", TIER_SMART): openai,
+        }
+        models: dict[tuple[str, str], str] = {
+            ("nvidia", TIER_SMART): "meta/llama-3.3-70b-instruct",
+            ("azure", TIER_SMART): "gpt-4o-mini",
+            ("openai", TIER_SMART): "gpt-4o-mini",
+        }
+        router = _build_router(
+            clients,
+            models,
+            max_cost=0.00001,  # below any paid input cost, above the free $0
+        )
+        router.generate("z" * 500, _ARCHITECT_PROMPT)
+        assert azure.calls == []
+        assert openai.calls == []
+        assert nvidia.calls

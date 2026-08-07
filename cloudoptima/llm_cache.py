@@ -1,8 +1,9 @@
-"""LLM response cache for CloudOptima.
+"""In-memory LLM response cache.
 
-Provides an in-memory, thread-safe cache with SHA-256 keys, gzip compression,
-TTL-based expiry, and size-based eviction. Designed to never crash — all errors
-are caught and logged, returning None on failure.
+Keys are SHA-256 hashes of the request, bodies are gzip-compressed, entries
+expire on a TTL, and the oldest 20% get evicted when we pass the size cap.
+The one rule that matters: it never crashes. Every error path is caught and
+logged, and a miss returns None so callers just fall through to the LLM.
 """
 
 from __future__ import annotations
@@ -39,19 +40,11 @@ class CacheStats:
 
 
 class LLMCache:
-    """In-memory LLM response cache with gzip compression and TTL expiry.
+    """Thread-safe response cache with compression, TTL, and size caps.
 
-    Features:
-        - SHA-256 cache keys derived from (prompt, system_prompt, model, temperature)
-        - Gzip-compressed storage to minimize memory usage
-        - Automatic TTL-based expiry
-        - Size-based eviction (removes oldest 20% when limit exceeded)
-        - Thread-safe via threading.Lock
-        - Fault-tolerant: never crashes, returns None on error
-
-    Security:
-        - Never stores API keys in cache
-        - Does not cache responses containing error indicators
+    Two security rules are baked in: we never store API keys (keys are hashes
+    of the request, never the payload), and we refuse to cache anything that
+    looks like an error response.
     """
 
     def __init__(self, ttl_hours: int = 24, max_size_mb: int = 200) -> None:
@@ -71,7 +64,7 @@ class LLMCache:
 
     @staticmethod
     def _is_error_response(response: str) -> bool:
-        """Check if a response looks like an error and should not be cached."""
+        """True when the response is an error payload — those are never cached."""
         try:
             data = json.loads(response)
             if isinstance(data, dict) and "error" in data:
@@ -81,11 +74,11 @@ class LLMCache:
         return False
 
     def _total_size(self) -> int:
-        """Calculate total size of all cached entries in bytes."""
+        """Sum of every entry's stored size in bytes."""
         return sum(entry.size_bytes for entry in self._store.values())
 
     def _evict_oldest(self) -> None:
-        """Remove the oldest 20% of entries when cache exceeds max size."""
+        """Drop the oldest 20% (at least one entry) once we're over the cap."""
         if not self._store:
             return
 
@@ -112,17 +105,7 @@ class LLMCache:
         model: str,
         temperature: float,
     ) -> str | None:
-        """Retrieve a cached response, or None if not found/expired.
-
-        Args:
-            prompt: The user/agent prompt.
-            system_prompt: The system prompt.
-            model: The model name.
-            temperature: The sampling temperature.
-
-        Returns:
-            The cached response string, or None on miss/expiry/error.
-        """
+        """Return the cached response for a request, or None on miss/expiry/error."""
         try:
             key = self._make_key(prompt, system_prompt, model, temperature)
             with self._lock:
@@ -157,18 +140,7 @@ class LLMCache:
         temperature: float,
         response: str,
     ) -> None:
-        """Store a response in the cache.
-
-        Skips caching if the response appears to be an error.
-        Triggers eviction if the cache exceeds the size limit.
-
-        Args:
-            prompt: The user/agent prompt.
-            system_prompt: The system prompt.
-            model: The model name.
-            temperature: The sampling temperature.
-            response: The LLM response text to cache.
-        """
+        """Store a response, skipping error payloads and evicting if over the cap."""
         try:
             # Security: don't cache error responses
             if self._is_error_response(response):
@@ -200,11 +172,7 @@ class LLMCache:
             _logger.info("Cache cleared")
 
     def stats(self) -> dict[str, Any]:
-        """Return cache statistics.
-
-        Returns:
-            Dict with entries, total_size_bytes, hits, misses, evictions, errors.
-        """
+        """Return hit/miss/eviction counters and current size for monitoring."""
         with self._lock:
             return {
                 "entries": len(self._store),

@@ -1,29 +1,28 @@
-"""Cost-aware LLM provider routing (Phase 7.5 — production optimization).
+"""Cost-aware LLM provider routing (Phase 7.5 / 7.6).
 
-Instead of pinning the app to a single provider, a :class:`CostAwareRouter`
-picks, for every agent call, the cheapest *enabled* provider that has
-credentials, and fails over automatically when a provider is unavailable or
-rate-limited (e.g. the Nvidia NIM free tier returning HTTP 429s).
+Instead of pinning the app to one provider, :class:`CostAwareRouter` picks the
+cheapest *enabled* provider with credentials for each call and fails over
+automatically when one is down or rate-limited (the Nvidia NIM free tier is
+famously 429-prone).
 
 Real-world behaviors:
 
-- **Price-ordered selection.** Providers are tried cheapest-first using a
-  per-model price table (Nvidia NIM free tier is $0; Azure OpenAI bills per
-  token). Cheapest adequate, not cheapest imaginable: the Architect and the
-  Judge run the ``smart`` tier, the remaining specialists the cheaper ``fast``
+- **Price-ordered selection.** Providers are tried cheapest-first from a
+  per-model price table (Nvidia NIM is $0; Azure/OpenAI/Claude/Gemini bill per
+  token). "Cheapest adequate, not cheapest imaginable": the Architect and the
+  Judge get the ``smart`` tier, the other specialists the cheaper ``fast``
   tier.
-- **Rate-limit-aware failover.** A provider with repeated failures is
-  demoted behind healthier ones until it recovers (a successful call resets
-  the counter, which happens the next time the provider is tried), so load
-  shifts to the next-cheapest provider.
+- **Rate-limit-aware failover.** A provider that keeps failing is demoted
+  behind healthier ones until a call succeeds again, shifting load to the
+  next-cheapest.
 - **Spend guard.** A request whose estimated input cost would exceed
-  ``routing_max_cost_per_request`` skips that provider — belt-and-suspenders
+  ``routing_max_cost_per_request`` skips that provider — belt and suspenders
   on top of price ordering.
-- **Spend tracking.** Every call records estimated USD spend per provider via
-  :meth:`CostAwareRouter.stats`.
-- **Mock safety net.** If routing is enabled but no real provider has
-  credentials, the router falls back to :class:`MockClient` so development and
-  demos never crash on missing keys.
+- **Spend tracking.** Every call records estimated USD spend per provider
+  (:meth:`CostAwareRouter.stats`).
+- **Mock safety net.** If routing is on but no real provider has credentials,
+  the router falls back to :class:`MockClient` so demos never crash on
+  missing keys.
 
 Typical usage:
     >>> settings = Settings(routing_enabled=True)
@@ -43,18 +42,23 @@ from typing import Final
 
 from cloudoptima.config import Settings
 from cloudoptima.llm_client import (
+    AnthropicClient,
     AzureClient,
     BaseLLMClient,
+    GoogleClient,
     MockClient,
     NvidiaClient,
+    OpenAIClient,
     _detect_agent_type,
 )
 
 _logger = logging.getLogger(__name__)
 
 # ── Model price table (USD per 1M tokens: input, output) ────────────────
-# Nvidia NIM free tier (build.nvidia.com) is $0 but rate-limited; Azure OpenAI
-# uses 2026 Global Standard pay-as-you-go pricing.
+# Nvidia NIM free tier (build.nvidia.com) is $0 but rate-limited. The rest use
+# published 2026 list prices: Azure OpenAI and OpenAI pay-as-you-go, Anthropic
+# Claude, Google Gemini. Prices drive cheapest-first selection and spend
+# tracking, so they are deliberately conservative where unknown.
 MODEL_PRICES: Final[dict[str, tuple[float, float]]] = {
     "mock": (0.0, 0.0),
     "meta/llama-3.3-70b-instruct": (0.0, 0.0),
@@ -64,6 +68,13 @@ MODEL_PRICES: Final[dict[str, tuple[float, float]]] = {
     "gpt-4o-mini": (0.15, 0.60),
     "gpt-4o": (2.50, 10.00),
     "gpt-4.1": (2.00, 8.00),
+    "gpt-4.1-mini": (0.40, 1.60),
+    "claude-sonnet-4-20250514": (3.00, 15.00),
+    "claude-3-5-haiku-20241022": (0.80, 4.00),
+    "claude-3-7-sonnet-20250219": (3.00, 15.00),
+    "gemini-2.0-flash": (0.10, 0.40),
+    "gemini-2.5-flash": (0.30, 2.50),
+    "gemini-2.5-pro": (1.25, 10.00),
 }
 
 # Unknown models get a conservative price so they never rank ahead of known
@@ -108,7 +119,7 @@ class ProviderStats:
 
 
 class CostAwareRouter(BaseLLMClient):
-    """Routes each call to the cheapest available provider, with failover.
+    """Route each call to the cheapest healthy provider, failing over as needed.
 
     Args:
         settings: Application settings (routing config, spend cap).
@@ -158,6 +169,9 @@ class CostAwareRouter(BaseLLMClient):
             client = self._clients[key]
             try:
                 response = client.generate(prompt, system_prompt)
+                # Surface the winning provider's usage so agents can record
+                # per-turn token counts (Phase 10.2).
+                self.last_tokens_used = client.last_tokens_used
                 self._record_success(provider, key, prompt, response)
                 return response
             except Exception as exc:  # failover to the next provider
@@ -311,6 +325,78 @@ def create_routed_client(settings: Settings) -> CostAwareRouter:
                 )
             except (ValueError, TypeError) as exc:
                 _logger.info("Routing: Azure OpenAI unavailable — %s", exc)
+        elif provider == "openai":  # Phase 7.6
+            try:
+                add(
+                    "openai",
+                    TIER_SMART,
+                    OpenAIClient(
+                        settings,
+                        model=settings.llm_openai_model,
+                        timeout=settings.routing_timeout,
+                    ),
+                    settings.llm_openai_model,
+                )
+                add(
+                    "openai",
+                    TIER_FAST,
+                    OpenAIClient(
+                        settings,
+                        model=settings.llm_openai_fast_model,
+                        timeout=settings.routing_timeout,
+                    ),
+                    settings.llm_openai_fast_model,
+                )
+            except (ValueError, TypeError) as exc:
+                _logger.info("Routing: OpenAI unavailable — %s", exc)
+        elif provider == "anthropic":  # Phase 7.6
+            try:
+                add(
+                    "anthropic",
+                    TIER_SMART,
+                    AnthropicClient(
+                        settings,
+                        model=settings.llm_anthropic_model,
+                        timeout=settings.routing_timeout,
+                    ),
+                    settings.llm_anthropic_model,
+                )
+                add(
+                    "anthropic",
+                    TIER_FAST,
+                    AnthropicClient(
+                        settings,
+                        model=settings.llm_anthropic_fast_model,
+                        timeout=settings.routing_timeout,
+                    ),
+                    settings.llm_anthropic_fast_model,
+                )
+            except (ValueError, TypeError) as exc:
+                _logger.info("Routing: Anthropic unavailable — %s", exc)
+        elif provider == "google":  # Phase 7.6
+            try:
+                add(
+                    "google",
+                    TIER_SMART,
+                    GoogleClient(
+                        settings,
+                        model=settings.llm_google_model,
+                        timeout=settings.routing_timeout,
+                    ),
+                    settings.llm_google_model,
+                )
+                add(
+                    "google",
+                    TIER_FAST,
+                    GoogleClient(
+                        settings,
+                        model=settings.llm_google_fast_model,
+                        timeout=settings.routing_timeout,
+                    ),
+                    settings.llm_google_fast_model,
+                )
+            except (ValueError, TypeError) as exc:
+                _logger.info("Routing: Google Gemini unavailable — %s", exc)
         else:  # pragma: no cover - guarded by Settings validation
             _logger.warning("Routing: unknown provider %r ignored", provider)
 
