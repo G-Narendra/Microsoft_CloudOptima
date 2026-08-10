@@ -227,7 +227,7 @@ dependency weight · learning value · Azure alignment):
 
 | Option | Determinism | Testability | Dependencies | Azure alignment | Verdict |
 |---|---|---|---|---|---|
-| **Custom orchestrator (current)** | ✅ Full — explicit loop | ✅ 418 tests | 0 | Neutral | **Recommended (for now)** |
+| **Custom orchestrator (current)** | ✅ Full — explicit loop | ✅ 478 tests | 0 | Neutral | **Recommended (for now)** |
 | **Microsoft Agent Framework (MAF)** | ✅ `WorkflowBuilder` supersteps (BSP) | ✅ | `agent-framework` (new) | ✅ Native | Strong candidate at deployment |
 | **LangGraph** | ✅ StateGraph | ✅ | langgraph | Neutral | Overkill for a fixed linear DAG |
 | **LangChain** | ⚠️ abstraction-heavy | ⚠️ | Large | Neutral | Rejected (original plan, outgrown) |
@@ -250,6 +250,9 @@ re-evaluated, not forgotten.
 - RFC merged to `dev`, linked in `DECISIONS.md`, and referenced in our comment on issue #6.
 - Punit can see we compared MAF/LangGraph/LangChain honestly, with a defensible
   recommendation and explicit revisit triggers.
+- RFC includes a **brainstorming & deliberation record** (timeline, debate
+  points, participants) — so the answer to "did you actually think about the
+  framework?" is auditable in the repo, not just "yes, in chat".
 
 ---
 
