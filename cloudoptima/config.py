@@ -177,6 +177,51 @@ class Settings(BaseSettings):
         description="List of suspicious/blocked input patterns",
     )
 
+    # ── Azure AI Content Safety (issue #2, OPTIONAL) ───
+    # ML-based harm moderation + Prompt Shields. Off by default; when the
+    # endpoint+key are set and content_safety_enabled is true, the regex layer
+    # in sanitize.py is backed by Azure's detectors. Missing credentials
+    # degrade to "no verdict" — the app never breaks without them (same
+    # contract as the live pricing module).
+    content_safety_endpoint: str = Field(
+        default="", description="Azure AI Content Safety endpoint (empty = feature off)"
+    )
+    content_safety_api_key: SecretStr = Field(
+        default=SecretStr(""), description="Azure AI Content Safety API key"
+    )
+    content_safety_threshold: int = Field(
+        default=4,
+        ge=0,
+        le=6,
+        description="Block severity threshold: 0-6 (4 = Medium and above blocks)",
+    )
+    content_safety_enabled: bool = Field(
+        default=False,
+        description="Enable Azure ML content moderation + prompt shields",
+    )
+
+    # ── Governance (issue #5, OPTIONAL) ────────────────
+    # Every tool call is checked against a declarative policy before it runs
+    # (allow / deny / require_approval). Delegates to Microsoft's Agent
+    # Governance Toolkit when installed; a mirrored built-in policy keeps the
+    # contract identical without it.
+    governance_enabled: bool = Field(
+        default=True,
+        description="Enforce the tool-action policy on every tool call",
+    )
+
+    # ── Tool-calling / MCP (issue #7, OPTIONAL) ────────
+    # The tool registry (live pricing, compliance lookup) is always available
+    # in-process; mcp_enabled additionally routes calls over the Model Context
+    # Protocol via the mcp bridge (needs the optional 'mcp' package).
+    tools_enabled: bool = Field(
+        default=True, description="Expose the built-in tool registry to the pipeline"
+    )
+    mcp_enabled: bool = Field(
+        default=False,
+        description="Route tool calls over MCP (requires the optional 'mcp' package)",
+    )
+
     @field_validator("llm_temperature")
     @classmethod
     def validate_temperature(cls, v: float) -> float:

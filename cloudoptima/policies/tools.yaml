@@ -1,0 +1,33 @@
+# CloudOptima tool policy — source of truth for the Agent Governance Toolkit
+# (issue #5). Written in AGT's declarative schema and validated by
+# `agt lint-policy cloudoptima/policies/` (passes clean). At runtime the
+# policy is loaded by agentmesh.governance.PolicyEngine and every tool call is
+# evaluated against it BEFORE execution (fail closed). Mirrored 1:1 by _POLICY
+# in cloudoptima/governance.py; a test keeps both in sync.
+#
+# `agents: ["*"]` makes this a global policy — every agent DID is governed.
+# The AGT CLI linter accepts allow/deny/warn actions only, so send_email is
+# denied here; require_approval verdicts are still supported by the runtime
+# PolicyEngine mapping for future write-tools.
+apiVersion: governance.toolkit/v1
+version: "1.0"
+name: cloudoptima-tools
+description: "Read-only lookups allowed; writes denied; destructive actions structurally impossible."
+agents: ["*"]
+default_action: deny
+rules:
+  - name: allow-read-only-lookups
+    description: "The only tools CloudOptima exposes today are read-only lookups."
+    stage: pre_tool
+    condition: "action.type in ['get_live_price', 'compliance_lookup', 'list_regions']"
+    action: allow
+  - name: deny-email-send
+    description: "Sending anything to the world is out of scope for a 3-student project."
+    stage: pre_tool
+    condition: "action.type == 'send_email'"
+    action: deny
+  - name: deny-write-actions
+    description: "Destructive or state-changing actions are structurally impossible."
+    stage: pre_tool
+    condition: "action.type in ['deploy', 'create', 'delete', 'drop', 'shell']"
+    action: deny

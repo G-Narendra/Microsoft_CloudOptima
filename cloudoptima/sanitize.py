@@ -25,6 +25,7 @@ Typical usage:
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import threading
@@ -37,6 +38,7 @@ __all__ = [
     "clean_input",
     "clean_output",
     "compile_blocked_patterns",
+    "decode_base64_tokens",
     "detect_injection",
     "extract_json",
     "rate_limit",
@@ -67,6 +69,14 @@ _ANSI_ESCAPE = re.compile(
 # and would mangle "C#" and "#1", which are common in Azure descriptions.
 _SQL_COMMENT = re.compile(r"(--+|/\*|\*/)")
 _SQL_QUOTES = re.compile(r"[\"';`]")
+
+# SQL *statements* — paired with a comment marker to flag decoded SQL payloads
+# without flagging innocent "0--9" or "US--Canada" ranges.
+_SQL_STATEMENT = re.compile(
+    r"\b(?:drop\s+table|delete\s+from|insert\s+into|update\s+\w+\s+set|"
+    r"union\s+(?:all\s+)?select|alter\s+table|truncate\s+table)\b",
+    re.I,
+)
 
 # Executable elements lose their content; other tags are dropped but their text
 # survives, so "<b>budget</b>" reads as "budget".
@@ -274,6 +284,62 @@ def _looks_like_base64(chunk: str) -> bool:
     return sum((has_digit, has_upper, has_lower)) >= 2
 
 
+# Canonical standard base64: alphabet, correct padding, no whitespace.
+_BASE64_TOKEN: re.Pattern[str] = re.compile(r"[A-Za-z0-9+/]+={0,2}")
+
+
+def decode_base64_tokens(text: str, max_depth: int = 3) -> list[str]:
+    """Decode standalone base64 tokens (including double-encoding) to reveal
+    smuggled payloads.
+
+    The blob heuristic (200+ chars) only catches *long* encoded payloads — a
+    short base64 token that decodes to an injection phrase sails past it (a
+    finding surfaced by the PyRIT campaign). Only tokens that are well-formed
+    standard base64 (canonical alphabet, length a multiple of 4, valid
+    padding) and decode to mostly-text UTF-8 are considered; ordinary prose is
+    never valid base64, so this has no false positives on normal input.
+
+    Args:
+        text:      The text to inspect.
+        max_depth: How many decode levels to follow (catches base64-of-base64).
+
+    Returns:
+        Decoded candidate strings at every level, deduplicated.
+    """
+    seen: set[str] = set()
+    decoded: list[str] = []
+    frontier = [text]
+    for _ in range(max_depth):
+        level: list[str] = []
+        for source in frontier:
+            for token in re.split(r"\s+", source.strip()):
+                if len(token) < 8 or len(token) % 4 != 0:
+                    continue
+                if not _BASE64_TOKEN.fullmatch(token):
+                    continue
+                try:
+                    raw = base64.b64decode(token, validate=True)
+                except Exception:  # noqa: S112 - non-base64 tokens are ordinary text
+                    continue
+                try:
+                    candidate = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    continue
+                # Mostly-text check (newlines/tabs allowed) — rejects binary.
+                text_chars = sum(
+                    char.isprintable() or char in "\n\t\r" for char in candidate
+                )
+                if len(candidate) >= 4 and text_chars / len(candidate) >= 0.9:
+                    if candidate not in seen:
+                        seen.add(candidate)
+                        decoded.append(candidate)
+                        level.append(candidate)
+        frontier = level
+        if not frontier:
+            break
+    return decoded
+
+
 def scan_for_malware_in_iac(iac_content: object) -> list[str]:
     """Scan generated IaC content for executable/malicious primitives.
 
@@ -443,7 +509,36 @@ def detect_injection(text: object) -> bool:
         return False
 
     candidates = {text, _normalize_unicode(text)}
-    return any(p.search(c) for c in candidates for p in _INJECTION_PATTERNS)
+    if any(p.search(c) for c in candidates for p in _INJECTION_PATTERNS):
+        return True
+
+    # Short base64 tokens that decode to hostile content (surfaced by the
+    # PyRIT campaign) are re-scanned after decoding: injection phrases, and
+    # payloads the sanitizer would have neutralized (HTML/XSS, SQL comments,
+    # path traversal) — length-based blob detection alone would miss them.
+    decoded = decode_base64_tokens(text)
+    if any(
+        p.search(candidate)
+        for token in decoded
+        for candidate in {token, _normalize_unicode(token)}
+        for p in _INJECTION_PATTERNS
+    ):
+        return True
+    # Structurally-dangerous patterns only: a decoded SQL payload needs a real
+    # statement plus a comment marker (a bare "--" is ordinary prose), and
+    # blanket <...> tags are dropped from this scan to avoid flagging innocuous
+    # decoded markup like "<b>" or "<2".
+    return any(
+        _SCRIPT_BLOCK.search(candidate)
+        or _DANGLING_SCRIPT.search(candidate)
+        or _PATH_TRAVERSAL.search(candidate)
+        or _JS_SCHEME.search(candidate)
+        or _EVENT_HANDLER.search(candidate)
+        or (
+            _SQL_COMMENT.search(candidate) and _SQL_STATEMENT.search(candidate)
+        )
+        for candidate in decoded
+    )
 
 
 class _RateLimiter:

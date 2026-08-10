@@ -43,6 +43,7 @@ from cloudoptima.agents import ALL_AGENTS
 from cloudoptima.config import Settings
 from cloudoptima.llm_client import create_llm_client
 from cloudoptima.llm_routing import create_routed_client
+from cloudoptima.mcp_bridge import get_tool_executor
 from cloudoptima.models import AgentTurn, AgentType, Artifact, Conflict, Session
 from cloudoptima.observability import TraceEvent, get_audit_logger
 from cloudoptima.sanitize import clean_output, rate_limit, scan_for_malware_in_iac
@@ -187,6 +188,9 @@ class Orchestrator:
         self.agents = agents
         self.config = config
         self._session_gate = _SessionGate()
+        # Issue #7: tool executor (MCP when enabled, else the in-process
+        # registry) — lets callers run tools with the session's settings.
+        self.tools = get_tool_executor(config)
 
     @classmethod
     def from_settings(cls, settings: Settings) -> Orchestrator:

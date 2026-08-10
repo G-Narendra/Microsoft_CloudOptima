@@ -3,6 +3,8 @@
 > **What we're building:** A multi-agent AI system that designs cloud architectures. Users describe their needs → 5 AI agents analyze → Judge resolves conflicts → we give them a complete plan with cost, security, and compliance checks.
 > **Stack:** Python 3.11 · Streamlit · Pydantic v2 · OpenAI/Nvidia/Azure LLMs · Docker · Azure App Service
 > **Key concerns:** Prompt injection · AI output validation · Input sanitization · Rate limiting · Audit logs
+> **Team progress:** See [`docs/PROGRESS_REPORT.md`](./PROGRESS_REPORT.md) — Punit's issue resolutions,
+> phase status, team contributions, and the roadmap for the remaining phases (12–15).
 
 ---
 
@@ -472,32 +474,53 @@ Each phase has tasks with `[ ]` checkboxes. Mark `[x]` when done. Don't skip pha
 
 ---
 
-## Phase 11: Testing (Day 12-14)
+## Phase 11: Testing (Day 12-14) ✅ COMPLETE — targets exceeded
 
 > **Goal:** 30+ tests that give us confidence nothing's broken.
+> **Actual: 478 tests · 93% coverage (85% fail-under gate) · mypy & ruff clean.**
+> **Also carries Punit's issues #2–#5** (Responsible AI): see sections 11.4–11.6 below.
 
 ### 11.1 — Test Setup
-- [ ] `conftest.py` with: mock_client, sample_session, malicious_session
-- [ ] `pytest.ini` — verbose mode, coverage on
+- [x] `conftest.py` with shared fixtures (e.g. `_no_live_pricing_network` autouse guard)
+- [x] pytest config — verbose + coverage + 85% fail-under gate (in `pyproject.toml` `[tool.pytest.ini_options]`)
 
 ### 11.2 — Unit Tests (30+)
-- [ ] `test_models.py` — 4 tests
-- [ ] `test_sanitize.py` — 6 tests (XSS, SQLi, null bytes, etc.)
-- [ ] `test_llm_cache.py` — 4 tests (hit, miss, expiry, concurrent)
-- [ ] `test_agents.py` — 5 tests (one per agent)
-- [ ] `test_orchestrator.py` — 5 tests (pipeline, conflicts, artifacts, errors)
-- [ ] `test_security.py` — 9 tests (all the penetration tests above)
+- [x] `test_models.py`
+- [x] `test_sanitize.py` — XSS, SQLi, null bytes, homoglyphs, base64 decode-then-scan, etc.
+- [x] `test_llm_cache.py` — hit, miss, expiry, concurrent
+- [x] `test_agents.py` — one per agent + judge security invariant
+- [x] `test_orchestrator.py` — pipeline, conflicts, artifacts, errors
+- [x] `test_security.py` — penetration tests (plus `test_safety.py`, `test_redteam.py`)
 
 ### 11.3 — Integration Tests
-- [ ] End-to-end: session in → orchestrator.run() → validated session out
-- [ ] With MockClient: full pipeline in < 2 seconds
-- [ ] With malicious_session: pipeline rejects gracefully (no crash)
+- [x] End-to-end: session in → orchestrator.run() → validated session out
+- [x] With MockClient: full pipeline in < 2 seconds
+- [x] With malicious_session: pipeline rejects gracefully (no crash)
 
 ### 11.4 — Coverage Targets
-- [ ] 85%+ line coverage overall
-- [ ] 90%+ on: sanitize.py, agent_base.py, orchestrator.py
+- [x] 85%+ line coverage overall → **93%** (verified with the `--cov-fail-under=85` gate)
+- [x] 90%+ on: sanitize.py (**99%**), agent_base.py (**92%**), orchestrator.py (**93%**)
 
 ---
+
+### 11.4 — Issue #2: Azure AI Content Safety + Prompt Shields ✅
+- [x] `cloudoptima/safety.py` — `moderate_text` (Hate/SelfHarm/Sexual/Violence, severity 0-6, block >= 4)
+- [x] `shield_prompt` — user-prompt + document/indirect attack shields (closes the RAG poison vector with ML)
+- [x] Config: `CONTENT_SAFETY_ENDPOINT / API_KEY / THRESHOLD / ENABLED` (off by default; graceful fallback like pricing)
+- [x] Wired into CLI (`app.py`), dashboard (`build_session`), and compliance RAG enrichment
+- [x] Tests: `test_safety.py` (disabled / blocked / threshold / offline / shield paths)
+
+### 11.5 — Issue #4: Automated Evaluation (azure-ai-evaluation) ✅
+- [x] `scripts/evaluate/eval_data.jsonl` — 8-prompt golden dataset matching the dashboard input contract
+- [x] `scripts/evaluate/run_evaluation.py` — groundedness / relevance / coherence scored against the REAL pipeline
+- [x] `scripts/evaluate/README.md` + `evaluation` extra in `pyproject.toml`
+- [ ] Record baseline scores once a judge model (Azure OpenAI) is configured
+
+### 11.6 — Issue #3: PyRIT / AI Red Teaming ✅
+- [x] `scripts/redteam/redteam_cloudoptima.py` — deterministic ASR harness (jailbreak, homoglyph, delimiter forge, RAG poison, base64, rate limit)
+- [x] `--strict` gate (fails when any vector's ASR >= 5%) — CI-ready
+- [x] `redteam` extra + guarded PyRIT adapter in `pyproject.toml`
+- [ ] Nightly PyRIT campaign against the deployed endpoint (Phase 13+)
 
 ## Phase 12: Docker — Run Anywhere (Day 14-15)
 
@@ -524,6 +547,14 @@ Each phase has tasks with `[ ]` checkboxes. Mark `[x]` when done. Don't skip pha
 - [ ] **Security:** Verify `.env` is NOT in the image
 
 ---
+
+### 12.3 — Issue #7: MCP Tools (Docker) ✅
+- [x] `cloudoptima/tools/` — governed, sanitized tool registry (live pricing, compliance lookup, regions)
+- [x] `cloudoptima/mcp_server.py` — FastMCP server (stdio transport)
+- [x] `cloudoptima/mcp_bridge.py` — MCP client with in-process registry fallback (never raises)
+- [x] Config: `TOOLS_ENABLED`, `MCP_ENABLED` (MCP off by default until the optional `mcp` extra is installed)
+- [x] Orchestrator exposes `.tools` for callers; tests: `test_tools.py`
+- [ ] Expose the MCP server port in the Dockerfile when `MCP_ENABLED=true`
 
 ## Phase 13: Deploy to Azure (Day 15-18)
 
@@ -556,6 +587,14 @@ Each phase has tasks with `[ ]` checkboxes. Mark `[x]` when done. Don't skip pha
 - [ ] **Security:** No `.env` or secrets exposed
 
 ---
+
+### 13.3 — Issue #5: Agent Governance Toolkit (Deploy) ✅
+- [x] `cloudoptima/governance.py` — fail-closed policy checks (allow / deny / require_approval) + audit trail (`governance_decision` events)
+- [x] `cloudoptima/policies/tools.yaml` — declarative policy, AGT source of truth; mirrored 1:1 in Python for the offline path
+- [x] `governed_callable` wraps MCP-exposed tools so governance applies on every transport
+- [x] **Real AGT engine at runtime** — `agentmesh.governance.PolicyEngine` loads `policies/tools.yaml` (passes `agt lint-policy`, `agents: ["*"]`); `check_action` consults it (verified live: allow/deny), offline mirror remains the no-package fallback
+- [x] Tests: `test_governance.py` (verdicts, fail-closed, YAML/Python drift check)
+- [ ] `agt verify --strict` wired into CI when the toolkit is installed
 
 ## Phase 14: Production — Make It Reliable (Day 18-20)
 
@@ -676,5 +715,7 @@ Each phase has tasks with `[ ]` checkboxes. Mark `[x]` when done. Don't skip pha
 
 > **Phases 0–10 complete — including Phase 7.5 (LLM routing), Phase 7.6 (multi-provider),
 > Phase 8 (compliance rules, RAG, static + live pricing), Phase 9, and Phase 10 (security).**
-> **Remaining: Phase 11 mark-up (targets already exceeded: 400 tests, 93% coverage),
-> Phase 12 (Docker), Phase 13 (Azure deploy), Phase 14 (production), Phase 15 (persistence & auth).**
+> **Phase 11 complete in practice: 478 tests · 93% coverage (85% gate) · mypy & ruff clean —
+> plus Punit's issues #2–#5 (Prompt Shields, PyRIT, azure-ai-evaluation, AGT) and #7 (MCP).**
+> **Remaining: Phase 12 (Docker), Phase 13 (Azure deploy), Phase 14 (production),
+> Phase 15 (persistence & auth) — plan in [`docs/PROGRESS_REPORT.md`](./PROGRESS_REPORT.md).**

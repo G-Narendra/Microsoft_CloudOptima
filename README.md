@@ -2,7 +2,7 @@
 
 > **Multi-Agent Cloud Architecture Designer** — Describe your infrastructure, and 5 AI agents collaborate to design, cost, secure, and validate your cloud deployment.
 
-![Status](https://img.shields.io/badge/status-10_phases_complete-brightgreen)
+![Status](https://img.shields.io/badge/status-10_phases_%2B_issues_done-brightgreen)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![Streamlit](https://img.shields.io/badge/ui-streamlit-red)
 ![Azure](https://img.shields.io/badge/deploy-azure-blue)
@@ -23,7 +23,7 @@ Microsoft_CloudOptima is a multi-agent AI system that helps you design cloud arc
 
 ---
 
-## 🚧 Current Status — Phases 0–10 Complete (incl. 7.5, 7.6, 8)
+## 🚧 Current Status — Phases 0–11 Complete + Punit's Issues Resolved
 
 | Phase | Status |
 |-------|--------|
@@ -40,9 +40,13 @@ Microsoft_CloudOptima is a multi-agent AI system that helps you design cloud arc
 | Phase 8 — Compliance & Pricing | ✅ **Done** (21 immutable rules module, compliance RAG, static price DB, live Azure Retail Prices API with 1h cache — cost analyst grounded with real prices + dashboard panel) |
 | Phase 9 — Logging & Health Checks | ✅ **Done** (audit logging, @trace, health registry) |
 | Phase 10 — Security | ✅ **Done** (output jailbreak scanning, anomaly detection, strict schemas, static pricing, rate limiting enforced, 27 penetration tests) |
-| Phase 11–15 | 📅 Planned (11 is effectively done — 400 tests · 93% coverage) |
+| Punit's issues #2–#7 | ✅ **Done** (real Microsoft frameworks: Prompt Shields REST, PyRIT 0.14, azure-ai-evaluation, AGT PolicyEngine, MCP tools — full story in [PROGRESS_REPORT](./docs/PROGRESS_REPORT.md)) |
+| Phase 11 — Testing | ✅ **Done** (478 tests · 93% coverage · mypy & ruff clean) |
+| Phase 12–15 | 📅 Planned (Docker → Azure deploy → production → persistence & auth) |
 
 📋 **Full build checklist:** See [`docs/BUILD_CHECKLIST.md`](./docs/BUILD_CHECKLIST.md)
+
+📄 **Team progress, issue resolutions & roadmap:** See [`docs/PROGRESS_REPORT.md`](./docs/PROGRESS_REPORT.md)
 
 ---
 
@@ -199,13 +203,25 @@ Microsoft_CloudOptima/
 ├── cloudoptima/              # Python package (all code lives here)
 │   ├── __init__.py
 │   ├── agents/               # 5 AI agents (Architect, Cost, Security, Compliance, Judge)
-│   ├── compliance/           # Compliance agent — 21 hardcoded rules
-│   ├── pricing/              # Static Azure price catalog (Phase 10)
-│   └── tests/                # 349 tests · 93% coverage
+│   ├── compliance/           # Compliance agent — 21 immutable rules + RAG
+│   ├── pricing/              # Static catalog + live Azure Retail Prices API
+│   ├── tools/                # Governed read-only tools (live pricing, compliance, regions)
+│   ├── governance.py         # AGT PolicyEngine + fail-closed mirror (issue #5)
+│   ├── safety.py             # Azure Content Safety + Prompt Shields REST (issue #2)
+│   ├── mcp_server.py         # FastMCP server — stdio transport (issue #7)
+│   ├── mcp_bridge.py         # MCP client with in-process registry fallback (issue #7)
+│   └── tests/                # 478 tests · 93% coverage
+│
+├── scripts/                  # Responsible-AI harnesses (issues #3, #4)
+│   ├── evaluate/             # azure-ai-evaluation + offline F1/Rouge
+│   └── redteam/              # PyRIT 0.14 campaign + deterministic ASR gate
 │
 └── docs/
-    ├── BUILD_CHECKLIST.md    # Phase-by-phase task tracker
-    └── DECISIONS.md          # Architecture decision log
+    ├── BUILD_CHECKLIST.md          # Phase-by-phase task tracker
+    ├── DECISIONS.md                # Architecture decision log
+    ├── PROGRESS_REPORT.md          # Team progress, issue resolutions & roadmap
+    ├── GITHUB_ISSUES_PROPOSALS.md  # Issue → solution reference
+    └── rfcs/                       # RFC 0001 — custom orchestrator decision (issue #6)
 ```
 
 ---
@@ -225,4 +241,4 @@ See [`docs/BUILD_CHECKLIST.md`](./docs/BUILD_CHECKLIST.md) → Phase 10 for full
 
 ---
 
-*Phases 0–10 complete — the full 5-agent pipeline runs through the Streamlit dashboard (real progress, 4 result tabs, downloadable artifacts). Compliance & pricing (Phase 8) bring immutable rules, RAG-guided checks, and live Azure prices; the router (7.5–7.6) spans five LLM providers with cheapest-first failover; Phase 10 hardening covers jailbreak scanning, anomaly detection, strict schemas, and enforced rate limiting. Ready for the deployment phases (12–14) and persistence/auth (15).*
+*Phases 0–11 complete — the full 5-agent pipeline runs through the Streamlit dashboard (real progress, 4 result tabs, downloadable artifacts). Compliance & pricing (Phase 8) bring immutable rules, RAG-guided checks, and live Azure prices; the router (7.5–7.6) spans five LLM providers with cheapest-first failover; Phase 10 hardening covers jailbreak scanning, anomaly detection, strict schemas, and enforced rate limiting. All six of Punit's review issues are resolved with the real Microsoft frameworks — Prompt Shields (REST), a PyRIT 0.14 campaign (0% ASR), azure-ai-evaluation metrics, AGT PolicyEngine governance, and MCP tools — backed by 478 tests at 93% coverage. Ready for the deployment phases (12–14) and persistence/auth (15). See [docs/PROGRESS_REPORT.md](./docs/PROGRESS_REPORT.md).*

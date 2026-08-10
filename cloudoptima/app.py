@@ -22,6 +22,7 @@ from pydantic import ValidationError
 from cloudoptima.config import Settings
 from cloudoptima.models import Session
 from cloudoptima.orchestrator import Orchestrator
+from cloudoptima.safety import moderate_input_fields
 from cloudoptima.sanitize import DEFAULT_MAX_LENGTH, clean_input
 
 CLI_USAGE: Final[str] = (
@@ -72,8 +73,15 @@ def main(argv: list[str] | None = None) -> int:
     # Same first line of defense as the dashboard (build_session): clean every
     # user-supplied string before it enters the model, so hostile input (XSS,
     # SQL, null bytes) never survives into the session, the prompt, or the
-    # printed output.
+    # printed output. Issue #2: when Azure AI Content Safety is enabled, the
+    # cleaned fields are additionally moderated and blocked values are blanked.
     payload = _sanitize_payload(payload)
+    payload, blocked = moderate_input_fields(payload, settings)
+    if blocked:
+        print(
+            f"warning: blocked input field(s): {', '.join(blocked)}",
+            file=sys.stderr,
+        )
 
     try:
         session = Session.model_validate(payload)

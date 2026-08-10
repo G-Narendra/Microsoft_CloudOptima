@@ -46,6 +46,7 @@ from cloudoptima.models import (
     WorkloadType,
 )
 from cloudoptima.pricing import extract_services, live_prices
+from cloudoptima.safety import moderate_input_fields
 from cloudoptima.sanitize import clean_input, clean_output
 
 # ── Constants ───────────────────────────────────────────────────────────
@@ -112,25 +113,36 @@ def build_session(
     budget: float | None,
     services: str,
     context: str,
+    settings: Settings | None = None,
 ) -> Session:
     """Build a validated :class:`Session` from raw form values.
 
     Every user-supplied string is cleaned with :func:`clean_input` first, so
     hostile input (XSS, SQL, null bytes) never reaches the agents or the UI.
+    When ``settings`` has Azure AI Content Safety enabled (issue #2), the
+    cleaned fields are additionally moderated and blocked values are blanked.
     """
     budget_value: float | None = None
     if budget is not None and budget > 0:
         budget_value = float(budget)
 
+    cleaned: dict[str, str] = {
+        "project_name": clean_input(project_name, max_length=120),
+        "services": clean_input(services),
+        "user_prompt": clean_input(context),
+    }
+    if settings is not None:
+        cleaned, _blocked = moderate_input_fields(cleaned, settings)
+
     return Session(
-        project_name=clean_input(project_name, max_length=120),
+        project_name=cleaned["project_name"],
         workload_type=_parse_enum(WorkloadType, workload_type, WorkloadType.MIXED),
         scale=_parse_enum(DeploymentScale, scale, DeploymentScale.MEDIUM),
         region=_parse_enum(AzureRegion, region, AzureRegion.UAE_NORTH),
         compliance_frameworks=_parse_frameworks(frameworks),
         budget=budget_value,
-        services=clean_input(services),
-        user_prompt=clean_input(context),
+        services=cleaned["services"],
+        user_prompt=cleaned["user_prompt"],
         status="pending",
     )
 
@@ -392,6 +404,7 @@ def _render_input_form() -> None:
                 budget=budget,
                 services=services,
                 context=context,
+                settings=st.session_state.orchestrator.config,
             )
             st.session_state.thread = threading.Thread(
                 target=st.session_state.orchestrator.run,

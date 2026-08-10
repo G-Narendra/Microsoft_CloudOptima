@@ -19,12 +19,16 @@ and cleaned before they enter the prompt.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Final
 
 from cloudoptima.agent_base import BaseAgent
 from cloudoptima.compliance.rag import query_rag
 from cloudoptima.compliance.rules import RULE_IDS, render_rules_text
 from cloudoptima.models import AgentType, Session
+from cloudoptima.safety import shield_prompt
+
+_logger = logging.getLogger(__name__)
 
 _VALID_RULE_IDS: frozenset[str] = RULE_IDS
 _RULE_STATUSES: frozenset[str] = frozenset({"PASS", "FAIL", "WARNING", "CONFIG_NEEDED"})
@@ -93,9 +97,32 @@ class ComplianceOfficerAgent(BaseAgent):
         ]
 
         # Phase 8.2: enrich with framework-specific RAG guidance. Retrieved
-        # passages are already cleaned by query_rag (untrusted data).
+        # passages are untrusted — query_rag already cleans + injection-scans
+        # them; issue #2 adds the Prompt Shield (document / indirect-attack
+        # detection) on top, and attacked passages are dropped here. The
+        # shield works in two modes: the always-on offline floor (no Azure
+        # resource needed) and the ML shield; both report per-document attack
+        # flags, and any flagged passage is dropped before it reaches the prompt.
         for framework in frameworks.split(", "):
             passages = query_rag(session.user_prompt or "compliance", framework, _MAX_RAG_PASSAGES)
+            if passages:
+                shield = shield_prompt(
+                    session.user_prompt or "", passages, self.config
+                )
+                if shield.user_prompt_attack:
+                    _logger.warning(
+                        "Compliance RAG: user prompt flagged by Prompt Shields "
+                        "(session %s)",
+                        session.session_id,
+                    )
+                if shield.documents_attack and len(shield.documents_attack) == len(passages):
+                    passages = [
+                        passage
+                        for passage, attacked in zip(
+                            passages, shield.documents_attack, strict=False
+                        )
+                        if not attacked
+                    ]
             if passages:
                 sections.append("RELEVANT COMPLIANCE GUIDANCE:")
                 for passage in passages:

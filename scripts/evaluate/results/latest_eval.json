@@ -1,0 +1,14 @@
+{
+  "metrics": {
+    "f1.f1_score": 0.026733490264073925,
+    "f1.f1_score_score": 0.026733490264073925,
+    "f1.f1_score_passed": 0.0,
+    "rouge.rouge": 0.023487737124318033,
+    "rouge.rouge_score": 0.023487737124318033,
+    "rouge.rouge_passed": 0.0,
+    "f1.binary_aggregate": 0.0,
+    "rouge.binary_aggregate": 0.0
+  },
+  "samples": 8,
+  "judge_used": false
+}
