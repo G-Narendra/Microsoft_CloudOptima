@@ -11,9 +11,11 @@ Two tiers, both using the real ``azure-ai-evaluation`` SDK:
    and ``RougeScoreEvaluator`` compare the pipeline's summary against each
    prompt's ``golden_summary`` with deterministic token-overlap scores.
 2. **Judge-model metrics (when configured)** — ``GroundednessEvaluator``,
-   ``RelevanceEvaluator``, ``CoherenceEvaluator`` plus the safety evaluators
-   (``ViolenceEvaluator``, ``HateUnfairnessEvaluator``, ``SelfHarmEvaluator``,
-   ``SexualEvaluator``) using an Azure OpenAI judge model.
+   ``RelevanceEvaluator``, ``CoherenceEvaluator`` using an Azure OpenAI judge
+   model, plus the safety evaluators (``ViolenceEvaluator``,
+   ``HateUnfairnessEvaluator``, ``SelfHarmEvaluator``, ``SexualEvaluator``)
+   which additionally need an Azure AI project (AZURE_SUBSCRIPTION_ID,
+   AZURE_RESOURCE_GROUP, AZURE_AI_PROJECT_NAME).
 
 Requirements:
     - Optional extra: ``pip install -e ".[evaluation]"``
@@ -34,6 +36,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 # Make `cloudoptima` importable when this script runs from any directory.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -52,6 +55,11 @@ JUDGE_EVALUATORS: dict[str, tuple[str, ...]] = {
     "groundedness": ("groundedness",),
     "relevance": ("relevance",),
     "coherence": ("coherence",),
+}
+
+#: Content-safety evaluators -> metric keys (run only when an Azure AI
+#: project is configured — they call AI Content Safety through the project).
+SAFETY_EVALUATORS: dict[str, tuple[str, ...]] = {
     "violence": ("violence",),
     "hate_unfairness": ("hate_unfairness",),
     "self_harm": ("self_harm",),
@@ -130,6 +138,26 @@ def _model_config(judge_model: str = "") -> dict[str, str] | None:
     return config
 
 
+def _azure_ai_project() -> dict[str, str] | None:
+    """Azure AI project scope for the content-safety evaluators.
+
+    Newer ``azure-ai-evaluation`` versions require a project reference plus a
+    credential (not just a judge model) for the safety evaluators. Returns
+    ``None`` when the env vars are missing so the harness stays usable with a
+    judge model alone.
+    """
+    subscription = os.environ.get("AZURE_SUBSCRIPTION_ID", "")
+    resource_group = os.environ.get("AZURE_RESOURCE_GROUP", "")
+    project = os.environ.get("AZURE_AI_PROJECT_NAME", "")
+    if not (subscription and resource_group and project):
+        return None
+    return {
+        "subscription_id": subscription,
+        "resource_group_name": resource_group,
+        "project_name": project,
+    }
+
+
 def main() -> int:
     """Run the evaluation and write results to ``results/latest_eval.json``.
 
@@ -168,6 +196,7 @@ def main() -> int:
             ViolenceEvaluator,
             evaluate,
         )
+        from azure.identity import DefaultAzureCredential
     except ImportError:
         print(
             "azure-ai-evaluation is not installed — run:\n"
@@ -181,24 +210,38 @@ def main() -> int:
         return 2
 
     model_config = _model_config(args.judge_model)
-    evaluators: dict[str, object] = {
-        "f1": F1ScoreEvaluator(),
+    evaluators: dict[str, Any] = {
+        "f1": F1ScoreEvaluator(),  # type: ignore[no-untyped-call]
         "rouge": RougeScoreEvaluator(rouge_type=RougeType.ROUGE_L),
     }
     metric_keys: dict[str, tuple[str, ...]] = dict(OFFLINE_EVALUATORS)
     if model_config is not None:
+        credential = DefaultAzureCredential()
         evaluators.update(
             {
-                "groundedness": GroundednessEvaluator(model_config),
-                "relevance": RelevanceEvaluator(model_config),
-                "coherence": CoherenceEvaluator(model_config),
-                "violence": ViolenceEvaluator(model_config),
-                "hate_unfairness": HateUnfairnessEvaluator(model_config),
-                "self_harm": SelfHarmEvaluator(model_config),
-                "sexual": SexualEvaluator(model_config),
+                "groundedness": GroundednessEvaluator(model_config),  # type: ignore[no-untyped-call]
+                "relevance": RelevanceEvaluator(model_config),  # type: ignore[no-untyped-call]
+                "coherence": CoherenceEvaluator(model_config),  # type: ignore[no-untyped-call]
             }
         )
         metric_keys.update(JUDGE_EVALUATORS)
+        project = _azure_ai_project()
+        if project is not None:
+            evaluators.update(
+                {
+                    "violence": ViolenceEvaluator(credential, project),
+                    "hate_unfairness": HateUnfairnessEvaluator(credential, project),
+                    "self_harm": SelfHarmEvaluator(credential, project),
+                    "sexual": SexualEvaluator(credential, project),
+                }
+            )
+            metric_keys.update(SAFETY_EVALUATORS)
+        else:
+            print(
+                "Content-safety evaluators skipped — set AZURE_SUBSCRIPTION_ID, "
+                "AZURE_RESOURCE_GROUP and AZURE_AI_PROJECT_NAME in .env to "
+                "enable them (they need an Azure AI project)."
+            )
     else:
         print(
             "Judge model not configured — running offline F1/Rouge metrics only. "

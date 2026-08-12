@@ -69,10 +69,11 @@ try:  # pragma: no cover - exercised only when pyrit is installed
     PYRIT_AVAILABLE = True
 except Exception:  # pragma: no cover - exercised only when pyrit is missing
     PYRIT_AVAILABLE = False
-    PromptTarget = object  # Fallback for module import when pyrit is not installed
+    # Fallback so the module still imports (and tests skip) without pyrit.
+    PromptTarget = object  # type: ignore[misc, assignment]
 
 
-class CloudOptimaTarget(PromptTarget):  # type: ignore[misc] - guarded import above
+class CloudOptimaTarget(PromptTarget):  # guarded import above
     """PyRIT ``PromptTarget`` — routes each payload through CloudOptima's defenses.
 
     The response text is ``BLOCKED:<defense>`` when a defense fired, or
@@ -84,7 +85,7 @@ class CloudOptimaTarget(PromptTarget):  # type: ignore[misc] - guarded import ab
     handles validation + normalization and must not be overridden).
     """
 
-    async def _send_prompt_to_target_async(  # type: ignore[override]
+    async def _send_prompt_to_target_async(
         self,
         *,
         normalized_conversation: list[Message],
@@ -180,9 +181,22 @@ async def run_campaign(limit: int | None = None) -> list[dict[str, Any]]:
                     )
                 # Persist the exchange through PyRIT memory (best-effort).
                 try:  # pragma: no cover - depends on the installed pyrit version
-                    await memory.add_message(message=message)
-                    for response in responses:
-                        await memory.add_message(message=response)
+                    # The memory API renamed ``add_message`` to
+                    # ``add_message_to_memory`` across pyrit releases, and some
+                    # versions are async while others are sync — probe
+                    # dynamically so persistence never breaks a campaign on any
+                    # pyrit install.
+                    persist = getattr(memory, "add_message_to_memory", None) or getattr(
+                        memory, "add_message", None
+                    )
+                    if persist is not None:
+                        result = persist(message=message)
+                        if hasattr(result, "__await__"):
+                            await result
+                        for response in responses:
+                            result = persist(message=response)
+                            if hasattr(result, "__await__"):
+                                await result
                 except Exception:  # noqa: S110 - persistence is best-effort
                     pass
                 rows.append(

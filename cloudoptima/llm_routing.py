@@ -70,6 +70,7 @@ MODEL_PRICES: Final[dict[str, tuple[float, float]]] = {
     "gpt-4.1": (2.00, 8.00),
     "gpt-4.1-mini": (0.40, 1.60),
     "claude-sonnet-4-20250514": (3.00, 15.00),
+    "claude-3-5-sonnet-20241022": (3.00, 15.00),
     "claude-3-5-haiku-20241022": (0.80, 4.00),
     "claude-3-7-sonnet-20250219": (3.00, 15.00),
     "gemini-2.0-flash": (0.10, 0.40),

@@ -315,7 +315,9 @@ class NvidiaClient(BaseLLMClient):
         self, settings: Settings, model: str | None = None, timeout: float | None = None
     ) -> None:
         self._api_key = settings.nvidia_api_key.get_secret_value()
-        self._model = model or settings.llm_model
+        # Provider-specific fallback: `create_client()` builds clients without
+        # a model, and llm_model (gpt-4o-mini) is NOT a Nvidia NIM model.
+        self._model = model or settings.llm_nvidia_model
         self._temperature = settings.llm_temperature
         self._timeout = timeout if timeout is not None else settings.llm_timeout
 
@@ -436,7 +438,10 @@ class AzureClient(BaseLLMClient):
         self._api_key = api_key
         self._api_version = settings.azure_openai_api_version
         self._endpoint = settings.azure_openai_endpoint
-        self._model = model or settings.llm_model
+        # Provider-specific fallback: on Azure the model name must match the
+        # deployment name, so llm_model (the generic primary) is not a safe
+        # default — use llm_azure_model instead.
+        self._model = model or settings.llm_azure_model
         self._temperature = settings.llm_temperature
 
     def generate(self, prompt: str, system_prompt: str = "") -> str:

@@ -721,7 +721,7 @@ Each phase has tasks with `[ ]` checkboxes. Mark `[x]` when done. Don't skip pha
 > provider is a client class + a price-table row + a registry entry.
 
 - [x] **OpenAI (direct)** client — `gpt-4o` / `gpt-4o-mini`, `json_object` mode
-- [x] **Anthropic Claude** client — `claude-sonnet-4-20250514`, JSON-capable
+- [x] **Anthropic Claude** client — `claude-3-5-sonnet-20241022`, JSON-capable
 - [x] **Google Gemini** client — `gemini-2.0-flash`, JSON mode
 - [x] Price-table rows for every provider (real USD per 1M tokens)
 - [x] Provider registry: `ROUTING_PROVIDERS=openai,azure,anthropic,google,nvidia`

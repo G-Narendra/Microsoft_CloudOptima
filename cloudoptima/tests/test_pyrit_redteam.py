@@ -11,6 +11,7 @@ import sys
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -38,7 +39,7 @@ def _pyrit_memory() -> Iterator[None]:
         pass
 
 
-def _message(text: str) -> object:
+def _message(text: str) -> Any:
     from pyrit.models import Message, MessagePiece
 
     return Message(

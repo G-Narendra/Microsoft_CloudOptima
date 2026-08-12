@@ -35,7 +35,7 @@ try:  # pragma: no cover - exercised only when chromadb is installed
 
     CHROMADB_AVAILABLE = True
 except Exception:  # pragma: no cover - exercised only when chromadb is missing
-    chromadb = None  # type: ignore[assignment]
+    chromadb = None
     CHROMADB_AVAILABLE = False
 
 # ── Built-in compliance corpus ───────────────────────────────────────────
