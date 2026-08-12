@@ -101,7 +101,7 @@ class SecurityEngineerAgent(BaseAgent):
                     return False, f"each finding must have a string '{key}'"
             cvss = item.get("cvss_score")
             if cvss is not None and (
-                not isinstance(cvss, (int, float)) or isinstance(cvss, bool)
+                not isinstance(cvss, int | float) or isinstance(cvss, bool)
             ):
                 return False, "'cvss_score' must be a number or null"
             # Details must never smuggle executable primitives into the plan.

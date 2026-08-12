@@ -247,7 +247,7 @@ class TestCreateRoutedClient:
             ("nvidia", TIER_SMART): "meta/llama-3.3-70b-instruct",
             ("openai", TIER_SMART): "gpt-4o-mini",
             ("azure", TIER_SMART): "gpt-4o-mini",
-            ("anthropic", TIER_SMART): "claude-sonnet-4-20250514",
+            ("anthropic", TIER_SMART): "claude-3-5-sonnet-20241022",
         }
         router = _build_router(clients, models)
         result = router.generate("design a system", _ARCHITECT_PROMPT)

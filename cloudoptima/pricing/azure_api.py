@@ -180,7 +180,7 @@ def _fetch_price(
                     if meter_id and item.get("meterId") != meter_id:
                         continue
                     price = item.get("retailPrice")
-                    if not isinstance(price, (int, float)) or isinstance(price, bool):
+                    if not isinstance(price, int | float) or isinstance(price, bool):
                         continue
                     unit = str(item.get("unitOfMeasure") or "unit")
                     entry = (float(price), unit)

@@ -78,15 +78,16 @@ class TestRules:
 # ── RAG module (Phase 8.2) ──────────────────────────────────────────────
 
 
-class TestRAG:
+@pytest.fixture(autouse=True)
+def _force_keyword_backend(monkeypatch: pytest.MonkeyPatch) -> Any:
     """RAG tests pin the keyword backend so they are hermetic on any machine
     (with or without chromadb installed)."""
+    monkeypatch.setattr(rag, "CHROMADB_AVAILABLE", False)
+    monkeypatch.setattr(rag, "chromadb", None)
+    monkeypatch.setattr(rag, "_rag", None)
 
-    @pytest.fixture(autouse=True)
-    def _force_keyword_backend(self, monkeypatch: pytest.MonkeyPatch) -> Any:
-        monkeypatch.setattr(rag, "CHROMADB_AVAILABLE", False)
-        monkeypatch.setattr(rag, "chromadb", None)
 
+class TestRAG:
     def test_keyword_backend_when_chromadb_missing(self) -> None:
         rag_instance = ComplianceRAG()
         assert rag_instance.backend == "keyword"

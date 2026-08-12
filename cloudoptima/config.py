@@ -105,7 +105,7 @@ class Settings(BaseSettings):
         default="gpt-4o-mini", description="OpenAI (direct) fast-tier model"
     )
     llm_anthropic_model: str = Field(
-        default="claude-sonnet-4-20250514",
+        default="claude-3-5-sonnet-20241022",
         description="Anthropic Claude smart-tier model",
     )
     llm_anthropic_fast_model: str = Field(

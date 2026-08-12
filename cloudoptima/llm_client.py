@@ -424,10 +424,12 @@ class AzureClient(BaseLLMClient):
                 "Set AZURE_OPENAI_ENDPOINT in .env."
             )
 
+        self._timeout = timeout if timeout is not None else settings.llm_timeout
         self._client = openai.AzureOpenAI(
             api_key=api_key,
             api_version=settings.azure_openai_api_version,
             azure_endpoint=settings.azure_openai_endpoint,
+            http_client=httpx.Client(timeout=float(self._timeout)),
         )
         # Kept for the async path (agenerate) — avoids reaching into private
         # SDK attributes like ``_client._api_version``.
@@ -436,7 +438,6 @@ class AzureClient(BaseLLMClient):
         self._endpoint = settings.azure_openai_endpoint
         self._model = model or settings.llm_model
         self._temperature = settings.llm_temperature
-        self._timeout = timeout if timeout is not None else settings.llm_timeout
 
     def generate(self, prompt: str, system_prompt: str = "") -> str:
         """Send a chat completion request to Azure OpenAI with JSON mode."""
@@ -520,10 +521,13 @@ class OpenAIClient(BaseLLMClient):
                 "openai_api_key is required for OpenAIClient. "
                 "Set OPENAI_API_KEY in .env or use DEMO_MODE=true."
             )
-        self._client = openai.OpenAI(api_key=api_key)
+        self._timeout = timeout if timeout is not None else settings.llm_timeout
+        self._client = openai.OpenAI(
+            api_key=api_key,
+            http_client=httpx.Client(timeout=float(self._timeout)),
+        )
         self._model = model or settings.llm_openai_model
         self._temperature = settings.llm_temperature
-        self._timeout = timeout if timeout is not None else settings.llm_timeout
 
     def generate(self, prompt: str, system_prompt: str = "") -> str:
         """Send a chat completion request to OpenAI with JSON mode."""

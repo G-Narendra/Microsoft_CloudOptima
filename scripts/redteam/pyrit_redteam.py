@@ -69,6 +69,7 @@ try:  # pragma: no cover - exercised only when pyrit is installed
     PYRIT_AVAILABLE = True
 except Exception:  # pragma: no cover - exercised only when pyrit is missing
     PYRIT_AVAILABLE = False
+    PromptTarget = object  # Fallback for module import when pyrit is not installed
 
 
 class CloudOptimaTarget(PromptTarget):  # type: ignore[misc] - guarded import above

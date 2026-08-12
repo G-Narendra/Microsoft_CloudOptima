@@ -46,7 +46,7 @@ def test_mock_client_cost() -> None:
     assert "estimate" in data
     assert "breakdown" in data
     assert "budget_status" in data
-    assert isinstance(data["estimate"], (int, float))
+    assert isinstance(data["estimate"], int | float)
 
 
 def test_mock_client_security() -> None:

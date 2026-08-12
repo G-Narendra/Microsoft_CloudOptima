@@ -418,11 +418,11 @@ class Orchestrator:
             estimate = cost.get("estimate")
             over_budget = (
                 budget is not None
-                and isinstance(estimate, (int, float))
+                and isinstance(estimate, int | float)
                 and estimate > budget
             )
             if over_budget or cost.get("budget_status") == "OVER":
-                if budget is not None and isinstance(estimate, (int, float)):
+                if budget is not None and isinstance(estimate, int | float):
                     issue = (
                         f"Estimated monthly cost ${estimate:,.2f} exceeds the "
                         f"${budget:,.2f} budget"
@@ -488,7 +488,7 @@ class Orchestrator:
             ]
             if (
                 budget is not None
-                and isinstance(estimate, (int, float))
+                and isinstance(estimate, int | float)
                 and estimate >= budget
                 and open_gaps
             ):
@@ -509,7 +509,7 @@ class Orchestrator:
             estimate = cost.get("estimate")
             if (
                 budget is not None
-                and isinstance(estimate, (int, float))
+                and isinstance(estimate, int | float)
                 and estimate > budget
                 and compliance.get("overall_status") == "NEEDS_WORK"
             ):

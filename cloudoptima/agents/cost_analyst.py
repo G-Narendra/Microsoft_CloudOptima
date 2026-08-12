@@ -129,7 +129,7 @@ class CostAnalystAgent(BaseAgent):
             return False, message
 
         estimate = data.get("estimate")
-        if not isinstance(estimate, (int, float)) or isinstance(estimate, bool):
+        if not isinstance(estimate, int | float) or isinstance(estimate, bool):
             return False, "'estimate' must be a number"
 
         status = data.get("budget_status")
@@ -156,7 +156,7 @@ class CostAnalystAgent(BaseAgent):
                     "(pricing is a fixed catalog — see cloudoptima.pricing)"
                 )
             cost = item.get("cost")
-            if not isinstance(cost, (int, float)) or isinstance(cost, bool):
+            if not isinstance(cost, int | float) or isinstance(cost, bool):
                 return False, "each breakdown item must have a numeric 'cost'"
 
         savings = data.get("savings")
