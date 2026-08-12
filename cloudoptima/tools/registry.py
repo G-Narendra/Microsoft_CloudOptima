@@ -26,13 +26,28 @@ import logging
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Final
 
 from cloudoptima.config import Settings
 from cloudoptima.governance import enforce_action
 from cloudoptima.sanitize import clean_output, detect_injection, scan_llm_output
 
 _logger = logging.getLogger(__name__)
+
+#: Tools must answer within this many seconds or the call fails. The LLM
+#: clients have timeouts; the tools need the same guarantee — a hung pricing
+#: API call or slow RAG query must never block the pipeline indefinitely
+#: (external principal-engineer review finding).
+TOOL_TIMEOUT_SECONDS: Final[float] = 15.0
+
+#: Parameter type checks used to validate tool arguments against the declared
+#: schema before execution (booleans are deliberately excluded from "number").
+_TYPE_CHECKS: Final[dict[str, Callable[[Any], bool]]] = {
+    "string": lambda v: isinstance(v, str),
+    "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
+    "number": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
+    "boolean": lambda v: isinstance(v, bool),
+}
 
 
 @dataclass(frozen=True)
@@ -133,7 +148,7 @@ class ToolRegistry:
         if spec is None:
             return {"ok": False, "tool": name, "error": f"unknown tool: {name}", "result": None}
 
-        # Governance first — a denied action never reaches the tool.
+        #        # Governance first — a denied action never reaches the tool.
         try:
             enforce_action({"type": spec.governance_type, "params": args or {}}, settings)
         except Exception as exc:
@@ -144,11 +159,30 @@ class ToolRegistry:
                 "result": None,
             }
 
+        # Validate the arguments against the tool's declared parameter schema
+        # BEFORE execution: a model passing {"service": 42} must be rejected at
+        # the schema layer, not explode inside the tool function (external
+        # principal-engineer review finding).
+        effective_args, arg_error = self._validate_args(spec, args or {})
+        if arg_error is not None:
+            return {
+                "ok": False,
+                "tool": name,
+                "error": f"invalid arguments: {arg_error}",
+                "result": None,
+            }
+
         try:
-            result = spec.func(**(args or {}))
+            result = _call_with_timeout(
+                spec.func, effective_args or {}, TOOL_TIMEOUT_SECONDS
+            )
+        except TimeoutError as exc:
+            _logger.warning("Tool %r timed out after %ss", name, TOOL_TIMEOUT_SECONDS)
+            return {"ok": False, "tool": name, "error": str(exc), "result": None}
         except Exception as exc:
             _logger.warning("Tool %r raised: %s", name, exc)
             return {"ok": False, "tool": name, "error": f"tool failed: {exc}", "result": None}
+
 
         # Tool output is untrusted: serialize, clean, scan, withhold on flags.
         try:
@@ -181,6 +215,90 @@ class ToolRegistry:
         except json.JSONDecodeError:  # pragma: no cover - defensive
             cleaned = cleaned_text
         return {"ok": True, "tool": name, "result": cleaned, "source": "registry"}
+
+    # ── Argument validation & timeout helpers ─────────────────────────
+
+    @staticmethod
+    def _validate_args(
+        spec: ToolSpec, args: dict[str, Any]
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """Merge defaults and validate ``args`` against the parameter schema.
+
+        Args:
+            spec: The tool specification (its ``parameters`` map).
+            args: Raw keyword arguments from the caller (model, user, test).
+
+        Returns:
+            ``(effective_args, None)`` when valid — declared defaults filled
+            in — or ``(None, error_message)`` when a required parameter is
+            missing or a value has the wrong type. Tools without a parameter
+            schema accept anything (schema-less helpers like ``list_regions``).
+        """
+        schema = spec.parameters or {}
+        effective = dict(args)
+        for name, meta in schema.items():
+            meta = meta if isinstance(meta, dict) else {}
+            if name not in effective:
+                if meta.get("required", False):
+                    return None, f"missing required parameter '{name}'"
+                default = meta.get("default")
+                if default is not None:
+                    effective[name] = default
+                continue
+            expected = str(meta.get("type", "string"))
+            checker = _TYPE_CHECKS.get(expected)
+            if checker is not None and not checker(effective[name]):
+                return (
+                    None,
+                    f"parameter '{name}' must be {expected}, "
+                    f"got {type(effective[name]).__name__}",
+                )
+        return effective, None
+
+
+# ── Timeout execution ─────────────────────────────────────────────────────
+
+
+def _call_with_timeout(func: Callable[..., Any], args: dict[str, Any], timeout: float) -> Any:
+    """Call ``func(**args)`` on a daemon thread and enforce ``timeout``.
+
+    A tool that hangs (slow pricing API, blocking RAG query) must never block
+    the pipeline: the call runs on a daemon thread and the caller waits at
+    most ``timeout`` seconds. On timeout the thread is left to finish in the
+    background — daemon threads never block interpreter exit — and the call
+    raises :class:`TimeoutError`. Exceptions raised inside the tool propagate
+    to the caller unchanged.
+
+    Args:
+        func:    The tool callable.
+        args:    Keyword arguments for the call.
+        timeout: Seconds to wait before giving up.
+
+    Returns:
+        The tool's return value.
+
+    Raises:
+        TimeoutError: The tool did not return within ``timeout`` seconds.
+    """
+    box: dict[str, Any] = {}
+
+    def runner() -> None:
+        try:
+            box["value"] = func(**args)
+        except BaseException as exc:  # propagate any failure to the caller
+            box["error"] = exc
+
+    thread = threading.Thread(target=runner, daemon=True, name="cloudoptima-tool")
+    thread.start()
+    thread.join(timeout=timeout)
+    if thread.is_alive():
+        raise TimeoutError(
+            f"tool exceeded the {timeout:.0f}s execution limit and was abandoned"
+        )
+    if "error" in box:
+        # The runner only ever stores a BaseException under "error".
+        raise box["error"]
+    return box["value"]
 
 
 # ── Built-in tools ───────────────────────────────────────────────────────

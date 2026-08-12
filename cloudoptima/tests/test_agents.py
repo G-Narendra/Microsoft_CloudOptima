@@ -7,6 +7,7 @@ downstream agents, and graceful handling of injected prompts.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -201,7 +202,7 @@ def test_agent_works_with_mock_client(
     receive the architect payload and fail validation.
     """
     agent = _make_agent(agent_cls, agent_type)
-    turn = agent.analyze(_make_session())
+    turn = asyncio.run(agent.analyze(_make_session()))
 
     assert isinstance(turn, AgentTurn)
     assert turn.agent_type == agent_type
@@ -785,14 +786,14 @@ def test_judge_validation_rejects_non_list_overridden() -> None:
 def test_agent_bad_json_returns_error_turn() -> None:
     """Prose instead of JSON produces an error turn, not a crash."""
     agent = ArchitectAgent(AgentType.ARCHITECT, _ProseClient(), Settings())
-    turn = agent.analyze(_make_session())
+    turn = asyncio.run(agent.analyze(_make_session()))
     assert "error" in turn.output
 
 
 def test_agent_invalid_output_returns_error_turn() -> None:
     """Schema-invalid LLM output produces an error turn."""
     agent = CostAnalystAgent(AgentType.COST_ANALYST, _InvalidCostClient(), Settings())
-    turn = agent.analyze(_make_session())
+    turn = asyncio.run(agent.analyze(_make_session()))
     assert "error" in turn.output
     assert "budget_status" in turn.output["error"]
 
@@ -844,7 +845,9 @@ def test_cost_analyst_prompt_degrades_gracefully_offline() -> None:
 def test_compliance_prompt_includes_architect_design() -> None:
     """The compliance agent sees the architect's validated output."""
     session = _make_session()
-    architect_turn = _make_agent(ArchitectAgent, AgentType.ARCHITECT).analyze(session)
+    architect_turn = asyncio.run(
+        _make_agent(ArchitectAgent, AgentType.ARCHITECT).analyze(session)
+    )
     session.agent_turns.append(architect_turn)
 
     agent = _make_agent(ComplianceOfficerAgent, AgentType.COMPLIANCE)
@@ -899,7 +902,7 @@ def test_judge_prompt_includes_all_four_outputs_and_conflicts() -> None:
         (ComplianceOfficerAgent, AgentType.COMPLIANCE),
     ]
     for agent_cls, agent_type in agent_cases:
-        turn = _make_agent(agent_cls, agent_type).analyze(session)
+        turn = asyncio.run(_make_agent(agent_cls, agent_type).analyze(session))
         session.agent_turns.append(turn)
     session.conflicts.append(
         Conflict(
@@ -943,7 +946,7 @@ def test_agent_handles_injected_prompt_gracefully(
     )
 
     with caplog.at_level(logging.WARNING, logger="cloudoptima.agent_base"):
-        turn = agent.analyze(session)
+        turn = asyncio.run(agent.analyze(session))
 
     assert isinstance(turn, AgentTurn)
     assert any(

@@ -2,10 +2,13 @@
 
 What happens, in order:
 
-1. The four specialists run sequentially (Architect → Cost Analyst → Security
-   → Compliance). Each turn lands on ``session.agent_turns`` as it completes,
-   so downstream agents read upstream output and the judge sees all four plus
-   the detected conflicts.
+1. The Architect runs first (everyone downstream reads its design), then the
+   three remaining specialists — Cost Analyst, Security, Compliance — run
+   **in parallel** via :func:`asyncio.gather`, since they only depend on the
+   architect's output. This was the round-3 review P1: the old synchronous
+   ``for`` loop serialized five LLM calls that are 99% network wait, so
+   throughput was artificially capped. Each turn lands on
+   ``session.agent_turns`` in pipeline order afterwards.
 2. Disagreements are detected across all **six** specialist pairs. Detection
    is deterministic and keyed per pair — the budget check can only fire for
    (Architect, Cost Analyst). (v1 lesson: it used to fire for every pair and
@@ -22,14 +25,19 @@ Failure isolation: an agent that fails becomes an error turn and the pipeline
 keeps going. If anything unexpected still raises, ``run`` marks the session
 ``failed`` and returns it — it never crashes the caller.
 
+``run`` is async (round-3 P1). Sync callers — the Streamlit dashboard thread,
+CLI, and tests — wrap it with :func:`asyncio.run`.
+
 Example:
+    >>> import asyncio
     >>> from cloudoptima.orchestrator import Orchestrator
     >>> orch = Orchestrator.from_settings(Settings())
-    >>> session = orch.run(session)
+    >>> session = asyncio.run(orch.run(session))
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -41,12 +49,11 @@ from typing import Any, Final
 from cloudoptima.agent_base import BaseAgent
 from cloudoptima.agents import ALL_AGENTS
 from cloudoptima.config import Settings
-from cloudoptima.llm_client import create_llm_client
-from cloudoptima.llm_routing import create_routed_client
+from cloudoptima.context import AppContext, build_rate_limiter
 from cloudoptima.mcp_bridge import get_tool_executor
 from cloudoptima.models import AgentTurn, AgentType, Artifact, Conflict, Session
 from cloudoptima.observability import TraceEvent, get_audit_logger
-from cloudoptima.sanitize import clean_output, rate_limit, scan_for_malware_in_iac
+from cloudoptima.sanitize import RateLimiter, clean_output, scan_for_malware_in_iac
 
 _logger = logging.getLogger(__name__)
 
@@ -59,6 +66,13 @@ _PIPELINE_TYPES: Final[tuple[AgentType, ...]] = (
     AgentType.SECURITY,
     AgentType.COMPLIANCE,
     AgentType.JUDGE,
+)
+
+# The three specialists that run in parallel after the architect (P1).
+_SPECIALIST_TYPES: Final[tuple[AgentType, ...]] = (
+    AgentType.COST_ANALYST,
+    AgentType.SECURITY,
+    AgentType.COMPLIANCE,
 )
 
 # Bicep resource types keyed by architect output section.
@@ -171,6 +185,11 @@ class Orchestrator:
         self,
         agents: dict[AgentType, BaseAgent],
         config: Settings,
+        context: AppContext | None = None,
+        *,
+        audit_logger: Any = None,
+        anomaly_detector: Any = None,
+        rate_limiter: RateLimiter | None = None,
     ) -> None:
         """Wire the orchestrator with its agents and shared settings.
 
@@ -178,6 +197,16 @@ class Orchestrator:
             agents: A complete mapping of all five :class:`AgentType` roles to
                 their agent instances.
             config: The application :class:`Settings` used for shared behavior.
+            context: Optional :class:`AppContext` (round-3 P3) owning the
+                audit logger, anomaly detector, and rate limiter. When given,
+                those instances are used instead of module globals, so two
+                orchestrators in one process stay fully isolated.
+            audit_logger: Explicit logger override (falls back to context,
+                then the module singleton).
+            anomaly_detector: Explicit detector override (same precedence).
+            rate_limiter: Explicit limiter override (round-3 P2); defaults to
+                a fresh one built from config so the quota is never shared
+                by accident between unrelated orchestrators.
 
         Raises:
             ValueError: If any of the five agent roles is missing.
@@ -187,7 +216,21 @@ class Orchestrator:
             raise ValueError(f"Orchestrator is missing agents: {sorted(m.value for m in missing)}")
         self.agents = agents
         self.config = config
+        # Public so callers and tests can see exactly which dependencies this
+        # orchestrator owns (round-3 P3).
+        self.context = context
         self._session_gate = _SessionGate()
+        # Round-3 P3: prefer the injected dependency, then the context, and
+        # only fall back to the module singleton when neither is available.
+        self._audit_logger = audit_logger or (
+            context.audit_logger if context is not None else None
+        ) or get_audit_logger()
+        self._anomaly_detector = anomaly_detector or (
+            context.anomaly_detector if context is not None else None
+        )
+        self._rate_limiter = rate_limiter or (
+            context.rate_limiter if context is not None else None
+        ) or build_rate_limiter(config)
         # Issue #7: tool executor (MCP when enabled, else the in-process
         # registry) — lets callers run tools with the session's settings.
         self.tools = get_tool_executor(config)
@@ -196,8 +239,10 @@ class Orchestrator:
     def from_settings(cls, settings: Settings) -> Orchestrator:
         """Build a fully-wired orchestrator from application settings.
 
-        Creates one LLM client (Mock/Nvidia/Azure per ``settings.llm_provider``)
-        and instantiates every agent from :data:`ALL_AGENTS` in pipeline order.
+        Builds an :class:`AppContext` (round-3 P3) that owns the LLM client,
+        audit logger, anomaly detector, and rate limiter, then instantiates
+        every agent from :data:`ALL_AGENTS` with that context injected — no
+        hidden module globals on the production path.
 
         Args:
             settings: The application :class:`Settings`.
@@ -205,27 +250,24 @@ class Orchestrator:
         Returns:
             A ready-to-run :class:`Orchestrator`.
         """
-        llm_client = (
-            create_routed_client(settings)
-            if settings.routing_enabled
-            else create_llm_client(settings)
-        )
+        context = AppContext.from_settings(settings)
         agents: dict[AgentType, BaseAgent] = {
-            agent_type: agent_cls(agent_type, llm_client, settings)
+            agent_type: agent_cls(agent_type, context.llm_client, settings, context=context)
             for agent_type, agent_cls in zip(_PIPELINE_TYPES, ALL_AGENTS, strict=True)
         }
-        return cls(agents=agents, config=settings)
+        return cls(agents=agents, config=settings, context=context)
 
     # ── Pipeline ────────────────────────────────────────────────────────
 
-    def run(self, session: Session) -> Session:
-        """Execute the full pipeline over a session. Never raises.
+    async def run(self, session: Session) -> Session:
+        """Execute the full pipeline over a session. Never raises. (async, P1)
 
         Pipeline outputs are reset first so re-running the same session is
-        deterministic; then the four specialists run, conflicts are detected,
-        the judge arbitrates, and the four artifacts are generated. Any
-        unexpected exception marks the session ``failed`` and returns it with
-        whatever turns completed — the caller never sees a crash.
+        deterministic; then the architect runs, the three remaining
+        specialists run in parallel (:func:`asyncio.gather`), conflicts are
+        detected, the judge arbitrates, and the four artifacts are generated.
+        Any unexpected exception marks the session ``failed`` and returns it
+        with whatever turns completed — the caller never sees a crash.
 
         Args:
             session: The session to analyze. User inputs are preserved; the
@@ -238,8 +280,10 @@ class Orchestrator:
         started = time.monotonic()
 
         # Phase 10.4: block BEFORE any LLM call so a throttled analysis costs
-        # no API credits. The global hourly quota is shared process-wide.
-        if not rate_limit(
+        # no API credits. The quota is enforced by the injected rate limiter
+        # (round-3 P2) — memory for one process, Redis across scaled-out
+        # workers.
+        if not self._rate_limiter.allow(
             _GLOBAL_RATE_KEY,
             self.config.rate_limit_global_per_hour,
             _GLOBAL_RATE_WINDOW_SEC,
@@ -275,11 +319,11 @@ class Orchestrator:
             return session
 
         try:
-            return self._run_locked(session, started)
+            return await self._run_locked(session, started)
         finally:
             self._session_gate.release(session.session_id)
 
-    def _run_locked(self, session: Session, started: float) -> Session:
+    async def _run_locked(self, session: Session, started: float) -> Session:
         """Execute the pipeline after the rate-limit gates have passed."""
         session.status = "running"
         session.updated_at = datetime.now(UTC)
@@ -292,18 +336,38 @@ class Orchestrator:
 
         turns: dict[AgentType, AgentTurn] = {}
         try:
-            for agent_type in _PIPELINE_TYPES:
-                if agent_type == AgentType.JUDGE:
-                    continue
-                turn = self.agents[agent_type].analyze(session)
+            # The architect runs alone — every downstream agent reads its
+            # design via _prior_turn_json.
+            arch_turn = await self.agents[AgentType.ARCHITECT].analyze(session)
+            session.agent_turns.append(arch_turn)
+            turns[AgentType.ARCHITECT] = arch_turn
+            self._log_agent_failure(session, AgentType.ARCHITECT, arch_turn)
+
+            # Cost / Security / Compliance only depend on the architect's
+            # output, so they can run concurrently (round-3 P1). gather()
+            # returns results in input order, so session.agent_turns stays
+            # deterministic even though the three calls overlap.
+            specialist_results = await asyncio.gather(
+                self.agents[AgentType.COST_ANALYST].analyze(session),
+                self.agents[AgentType.SECURITY].analyze(session),
+                self.agents[AgentType.COMPLIANCE].analyze(session),
+            )
+            for agent_type, turn in zip(
+                _SPECIALIST_TYPES, specialist_results, strict=True
+            ):
                 session.agent_turns.append(turn)
                 turns[agent_type] = turn
+                # Error taxonomy: record WHY a turn failed (llm / parse /
+                # validation / prompt_build) so the audit trail distinguishes a
+                # transient provider outage from a bad model response.
+                self._log_agent_failure(session, agent_type, turn)
 
             session.conflicts = self._detect_conflicts(session, turns)
 
-            judge_turn = self.agents[AgentType.JUDGE].analyze(session)
+            judge_turn = await self.agents[AgentType.JUDGE].analyze(session)
             session.agent_turns.append(judge_turn)
             turns[AgentType.JUDGE] = judge_turn
+            self._log_agent_failure(session, AgentType.JUDGE, judge_turn)
 
             self._apply_judge_resolutions(session, judge_turn)
             session.artifacts = self._generate_artifacts(session, turns, judge_turn)
@@ -772,6 +836,37 @@ class Orchestrator:
 
     # ── Observability ───────────────────────────────────────────────────
 
+    def _log_agent_failure(
+        self,
+        session: Session,
+        agent_type: AgentType,
+        turn: AgentTurn,
+    ) -> None:
+        """Write a failed turn's error kind to the audit trail.
+
+        Successful turns are already visible through the orchestrator run
+        event; this adds the *reason* for failures (``error_kind``) so the
+        log answers "did the LLM go down, or did the model output garbage?"
+        Observability stays best-effort — never breaks the pipeline.
+        """
+        if "error" not in turn.output:
+            return
+        try:
+            (self._audit_logger or get_audit_logger()).log(
+                TraceEvent(
+                    event_type="agent_turn_error",
+                    agent_name=agent_type.value,
+                    status="error",
+                    session_id=session.session_id,
+                    extra={
+                        "error_kind": turn.output.get("error_kind", "unknown"),
+                        "message": str(turn.output.get("error", ""))[:200],
+                    },
+                )
+            )
+        except Exception:
+            _logger.debug("Failed to log agent turn error", exc_info=True)
+
     def _log_run_event(
         self,
         session: Session,
@@ -798,7 +893,7 @@ class Orchestrator:
                     **(extra or {}),
                 },
             )
-            get_audit_logger().log(event)
+            (self._audit_logger or get_audit_logger()).log(event)
         except Exception:
             _logger.debug("Failed to log orchestrator run event", exc_info=True)
 

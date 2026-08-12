@@ -21,7 +21,7 @@ the Microsoft Agent Framework (MAF).
 - The pipeline is a **fixed linear DAG** with one arbitration step — not a dynamic
   graph. There is no branching, no retry-on-condition, no runtime topology change.
 - Every agent returns **schema-validated structured JSON**; correctness is enforced by
-  tests (478 tests, 93% coverage), not by framework features.
+  tests (540 tests, 90.19% coverage), not by framework features.
 - The project is a learning exercise: understanding every layer is a goal in itself.
 - Constraints: minimal dependency footprint, deterministic execution, failure
   isolation (one failing agent must not crash the pipeline), and a clean audit trail.
@@ -41,7 +41,7 @@ the Microsoft Agent Framework (MAF).
 
 | Option | Determinism | Testability | Transparency | Dependencies | Azure alignment | Verdict |
 |---|---|---|---|---|---|---|
-| **Custom orchestrator (chosen)** | ✅ Explicit loop in `Orchestrator.run` | ✅ 478 tests | ✅ ~600 lines, fully owned | 0 | Neutral (provider-agnostic LLM router) | **Accepted** |
+| **Custom orchestrator (chosen)** | ✅ Async `Orchestrator.run` + `asyncio.gather` (round-3 P1) | ✅ 540 tests | ✅ ~600 lines, fully owned | 0 | Neutral (provider-agnostic LLM router) | **Accepted** |
 | **Microsoft Agent Framework (MAF)** | ✅ `WorkflowBuilder` executes in deterministic supersteps | ✅ | ⚠️ Higher abstraction to learn | `agent-framework` | ✅ Native (FoundryChatClient) | Defer — revisit at deployment |
 | **LangGraph** | ✅ `StateGraph` is deterministic | ✅ | ⚠️ State/reducer mental model | langgraph | Neutral | Rejected — overkill for a fixed DAG |
 | **LangChain** | ⚠️ Abstraction-heavy chains | ⚠️ | ⚠️ Large surface | Large | Neutral | Rejected — was the original plan, outgrown |
@@ -103,7 +103,7 @@ this is the trail that proves we did.
    during Phases 4–6 and dropped it.
 
 2. **"Determinism and testability beat framework features."** Every agent
-   returns schema-validated JSON; correctness is enforced by 478 tests, not by
+   returns schema-validated JSON; correctness is enforced by 540 tests, not by
    framework machinery. This was the strongest argument for custom, and it held.
 
 3. **"What about MAF / Semantic Kernel / AutoGen?"** Evaluated during the RFC

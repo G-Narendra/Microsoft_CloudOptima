@@ -185,6 +185,48 @@ class CostAwareRouter(BaseLLMClient):
             "(all candidates were skipped by the spend cap)"
         )  # pragma: no cover
 
+    async def agenerate(self, prompt: str, system_prompt: str = "") -> str:
+        """Async routing — same cheapest-healthy-first order, awaited calls.
+
+        Round-3 review P1: the old ``generate`` blocked on every provider's
+        HTTP call. This awaits each candidate's ``agenerate`` instead, so the
+        router participates in the parallel specialist run instead of pinning
+        the event loop. Failover, spend-cap skipping, and health tracking are
+        identical to the sync path.
+
+        Raises:
+            The last provider exception when every candidate fails, or
+            ``RuntimeError`` when no provider is available for the tier.
+        """
+        tier = self._tier_for(system_prompt)
+        candidates = self._ordered_candidates(tier)
+        if not candidates:
+            raise RuntimeError(f"no LLM provider available for tier {tier!r}")
+
+        last_exception: Exception | None = None
+        for provider, key in candidates:
+            if not self._within_spend_cap(provider, key, prompt):
+                _logger.debug("Routing: skipping %s — estimated input cost exceeds cap", provider)
+                continue
+            client = self._clients[key]
+            try:
+                response = await client.agenerate(prompt, system_prompt)
+                # Surface the winning provider's usage so agents can record
+                # per-turn token counts (Phase 10.2).
+                self.last_tokens_used = client.last_tokens_used
+                self._record_success(provider, key, prompt, response)
+                return response
+            except Exception as exc:  # failover to the next provider
+                self._record_failure(provider, exc)
+                last_exception = exc
+
+        if last_exception is not None:
+            raise last_exception
+        raise RuntimeError(
+            f"no LLM provider could handle the request for tier {tier!r} "
+            "(all candidates were skipped by the spend cap)"
+        )  # pragma: no cover
+
     # ── Routing internals ──────────────────────────────────────────────
 
     def _tier_for(self, system_prompt: str) -> str:

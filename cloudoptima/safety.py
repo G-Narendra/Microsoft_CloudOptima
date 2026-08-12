@@ -34,12 +34,14 @@ Typical usage:
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Final
 
 from cloudoptima.config import Settings
+from cloudoptima.sanitize import _LEET_CLASSES
 
 _logger = logging.getLogger(__name__)
 
@@ -102,16 +104,49 @@ _OFFLINE_INDIRECT_PHRASES: Final[tuple[str, ...]] = (
     "developer mode",
 )
 
+# Leetspeak classes for the offline floor: a letter may appear as itself or as
+# PyRIT's deterministic substitution (a->4, b->8, c->(, e->3, g->9, i->1,
+# l->1, o->0, s->5, t->7, z->2) plus common variants (@ $ ! |). A global digit
+# fold alone cannot recover words that mix 'i' and 'l' ("kill" -> "k111"
+# needs i-l-l, but a fold resolves every '1' the same way), so the floor also
+# matches each phrase leet-tolerantly (round-2 external-review finding).
+# Imported from :mod:`cloudoptima.sanitize` — one source of truth, no
+# manual-mirror drift (the round-1 review's exact critique of policy mirrors).
+
+
+def _leet_tolerant_regex(phrase: str) -> re.Pattern[str]:
+    """Compile ``phrase`` so each leet-able letter also matches its leet form.
+
+    Only used for the fixed, explicit offline phrase lists, so the broader
+    character classes cannot flag ordinary prose: "kill all users" as a whole
+    phrase is harmful in any encoding, while a lone "kill" (ops language) is
+    never on the list. Word boundaries are added inside the builder (a bare
+    ``\\b`` prefix would be re-escaped into a literal backslash), keeping
+    mid-word matches ("s1gn0r3...") out while real ones still hit.
+    """
+    body = "".join(_LEET_CLASSES.get(char, re.escape(char)) for char in phrase)
+    return re.compile(f"\\b{body}\\b", re.I)
+
+
+#: Compiled leet-tolerant forms of every offline harm phrase (built once).
+_OFFLINE_HARM_LEET: Final[dict[str, tuple[re.Pattern[str], ...]]] = {
+    category: tuple(_leet_tolerant_regex(p) for p in phrases)
+    for category, phrases in _OFFLINE_HARM_PHRASES.items()
+}
+
 
 @dataclass(frozen=True)
 class SafetyVerdict:
     """Outcome of :func:`moderate_text`.
 
     Attributes:
-        categories: category name -> severity (0-6). Empty when the ML layer
+        categories:  category name -> severity (0-6). Empty when the ML layer
             was not available or not configured.
-        blocked:    True when any severity >= the configured threshold.
-        source:     ``\"azure\"`` when the API answered, ``\"offline\"`` when the
+        blocked:     True when any severity >= the configured threshold.
+        max_severity: Highest severity across categories (0-6); 0 when nothing
+            was scored. Drives severity-based routing via :func:`severity_action`
+            (pass / log / block / escalate).
+        source:      ``\"azure\"`` when the API answered, ``\"offline\"`` when the
             deterministic floor flagged obvious harm or the API was
             unreachable, ``\"disabled\"`` when no endpoint/key was set and the
             floor did not fire.
@@ -119,6 +154,7 @@ class SafetyVerdict:
 
     categories: dict[str, int] = field(default_factory=dict)
     blocked: bool = False
+    max_severity: int = 0
     source: str = "disabled"
 
 
@@ -193,6 +229,70 @@ def _threshold(settings: Settings | None) -> int:
     return settings.content_safety_threshold
 
 
+class SafetyConfigurationError(RuntimeError):
+    """Raised when production mode runs without the ML safety layer.
+
+    A real Microsoft system fails closed: if the app is pointed at real LLM
+    providers, the Azure AI Content Safety layer is mandatory, not opt-in.
+    """
+
+
+def severity_action(severity: int, threshold: int = DEFAULT_THRESHOLD) -> str:
+    """Map a severity score to a handling action (pass / log / block / escalate).
+
+    Azure's severity scale is 0-6 (bucketed as 0/2/4/6). Following the
+    documented Microsoft routing pattern:
+
+    - ``0``            → ``"pass"``     — benign, proceed.
+    - ``1..threshold-1`` → ``"log"``   — monitor, still allowed.
+    - ``>= threshold`` → ``"block"``    — rejected at the entry point.
+    - ``6`` (High)     → ``"escalate"`` — blocked AND flagged for human
+      review (logged with the verdict).
+
+    Args:
+        severity:  The 0-6 severity score.
+        threshold: The block threshold (default 4 = Medium).
+
+    Returns:
+        One of ``"pass"`` / ``"log"`` / ``"block"`` / ``"escalate"``.
+    """
+    if severity <= 0:
+        return "pass"
+    if severity >= 6:
+        return "escalate"
+    if severity >= threshold:
+        return "block"
+    return "log"
+
+
+def enforce_production_safety(settings: Settings | None) -> None:
+    """Fail closed in production: real runs require the ML safety layer.
+
+    The reviewer's core demand: ``content_safety_enabled`` must be true when
+    ``demo_mode`` is false. With the mock provider nothing leaves the machine,
+    so demo mode may run on the regex floor alone; the moment the app is
+    pointed at real LLM providers the ML layer is mandatory, and the entry
+    points (:func:`cloudoptima.app.create_orchestrator`) refuse to start
+    without it instead of silently serving unguarded traffic.
+
+    Args:
+        settings: App settings.
+
+    Raises:
+        SafetyConfigurationError: When production mode is active but the
+            Content Safety resource is missing or disabled.
+    """
+    if settings is None or settings.demo_mode:
+        return
+    if _is_enabled(settings):
+        return
+    raise SafetyConfigurationError(
+        "Production mode requires the Azure AI Content Safety layer. Set "
+        "CONTENT_SAFETY_ENABLED=true plus CONTENT_SAFETY_ENDPOINT and "
+        "CONTENT_SAFETY_API_KEY in .env (or keep DEMO_MODE=true locally)."
+    )
+
+
 # ── Public API ────────────────────────────────────────────────────────────
 
 def moderate_text(
@@ -221,16 +321,26 @@ def moderate_text(
     # Layer 1.5 — always-on deterministic floor: blatant harm phrases are
     # flagged even with no Azure resource, so degraded mode still blocks the
     # obvious cases and the regex layer handles the technical ones. Base64-
-    # encoded threats are decoded and re-scanned (a PyRIT-campaign finding).
-    from cloudoptima.sanitize import decode_base64_tokens
+    # encoded threats are decoded and re-scanned, and ROT13 / character-
+    # reversed forms are unscrambled first — including base64 that was itself
+    # flipped or ROT13'd (PyRIT-campaign findings).
+    from cloudoptima.sanitize import decoded_base64_forms, obfuscated_forms
 
     offline = _offline_harm_scan(text)
-    for candidate in decode_base64_tokens(text):
+    candidates = set(obfuscated_forms(text))
+    for token in decoded_base64_forms(text):
+        candidates.update(obfuscated_forms(token))
+    for candidate in candidates:
         offline = offline or _offline_harm_scan(candidate)
         if offline:
             break
     if offline:
-        return SafetyVerdict(categories=offline, blocked=True, source="offline")
+        return SafetyVerdict(
+            categories=offline,
+            blocked=True,
+            max_severity=6,
+            source="offline",
+        )
 
     if not _is_enabled(settings):
         return verdict
@@ -245,10 +355,12 @@ def moderate_text(
             category = str(getattr(analysis.category, "value", analysis.category))
             severity = int(getattr(analysis, "severity", 0) or 0)
             severities[category] = severity
-        blocked = max(severities.values(), default=0) >= _threshold(settings)
+        max_severity = max(severities.values(), default=0)
+        blocked = max_severity >= _threshold(settings)
         return SafetyVerdict(
             categories=severities,
             blocked=blocked,
+            max_severity=max_severity,
             source="azure",
         )
     except Exception as exc:  # network, auth, throttling — degrade, never raise
@@ -284,14 +396,18 @@ def shield_prompt(
     # Layer 1.5 — always-on deterministic floor: direct and indirect attacks
     # the regex layer misses are flagged here, no credentials needed. The ML
     # shield adds ML-grade detection on top when Content Safety is configured.
-    # Base64-encoded attacks are decoded and re-scanned (PyRIT finding).
-    from cloudoptima.sanitize import decode_base64_tokens
+    # Base64-encoded attacks are decoded and re-scanned, and ROT13 / character-
+    # reversed forms are unscrambled first — including base64 that was itself
+    # flipped or ROT13'd (PyRIT-campaign findings).
+    from cloudoptima.sanitize import decoded_base64_forms, obfuscated_forms
 
     def _scan(text: str) -> bool:
-        return _offline_indirect_scan(text) or any(
-            _offline_indirect_scan(candidate)
-            for candidate in decode_base64_tokens(text)
-        )
+        if _offline_indirect_scan(text):
+            return True
+        candidates = set(obfuscated_forms(text))
+        for token in decoded_base64_forms(text):
+            candidates.update(obfuscated_forms(token))
+        return any(_offline_indirect_scan(candidate) for candidate in candidates)
 
     user_hit = _scan(user_prompt_text)
     doc_hits = [_scan(d) for d in docs]
@@ -341,13 +457,20 @@ def _offline_harm_scan(text: str) -> dict[str, int]:
     """Flag blatant harm phrases with no Azure resource (severity 6 each).
 
     Returns an empty dict when the text is clean. Callers treat a hit as a
-    ``blocked`` verdict with ``source=\"offline\"``.
+    ``blocked`` verdict with ``source=\"offline\"``. Phrases are matched both
+    literally and leet-tolerantly ("k111 411 u53r5" == "kill all users"),
+    which the global digit fold cannot recover because 'i' and 'l' both fold
+    to '1' (round-2 external-review finding).
     """
     lowered = text.lower()
     hits: dict[str, int] = {}
     for category, phrases in _OFFLINE_HARM_PHRASES.items():
         if any(phrase in lowered for phrase in phrases):
             hits[category] = 6
+    if not hits:  # literal scan missed — try the leet-tolerant patterns
+        for category, patterns in _OFFLINE_HARM_LEET.items():
+            if any(p.search(text) for p in patterns):
+                hits[category] = 6
     return hits
 
 

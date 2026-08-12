@@ -1,0 +1,97 @@
+# CloudOptima CI/CD — every push to `dev` runs the full quality gate; pushes to
+# `main` additionally deploy to Azure App Service (Phase 13, activates once the
+# app service + secrets exist).
+#
+# The gate mirrors what we prove locally: lint, typecheck, 478 tests with the
+# 85% coverage floor, the deterministic red-team gate, the PyRIT campaign, the
+# evaluation harness, AGT policy lint, and an MCP round-trip smoke test.
+
+name: CI/CD
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [dev, main]
+
+env:
+  PYTHON_VERSION: "3.11"
+  AZURE_WEBAPP_NAME: cloudoptima-app   # created in Phase 13
+
+jobs:
+  quality:
+    name: Lint · typecheck · test · red-team
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies (incl. responsible-AI extras)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,evaluation,redteam,governance,mcp,safety,rag]"
+
+      - name: Ruff lint
+        run: ruff check cloudoptima/ scripts/
+
+      - name: Mypy typecheck
+        run: mypy cloudoptima/
+
+      - name: Pytest + coverage gate
+        run: pytest
+
+      - name: Deterministic red-team gate (0% ASR allowed)
+        run: python scripts/redteam/redteam_cloudoptima.py --strict
+
+      - name: PyRIT campaign (offline tier, hermetic)
+        run: python scripts/redteam/pyrit_redteam.py --strict
+
+      - name: Evaluation harness (offline F1/Rouge tier)
+        run: python scripts/evaluate/run_evaluation.py
+
+      - name: AGT policy lint
+        run: agt lint-policy cloudoptima/policies/
+
+      - name: MCP round-trip smoke
+        run: python -c "
+          from cloudoptima.config import Settings;
+          from cloudoptima.mcp_bridge import MCPBridge;
+          b = MCPBridge(Settings(mcp_enabled=True));
+          r = b.call_tool('list_regions', {});
+          assert r['ok'] is True, r;
+          print('MCP round-trip OK:', r['source'])"
+
+  deploy:
+    name: Deploy to Azure App Service
+    needs: quality
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to Azure (OIDC, no stored secrets)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID }}
+          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID }}
+          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID }}
+
+      - name: Deploy web app
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ env.AZURE_WEBAPP_NAME }}
+          package: "."
+
+      - name: Azure logout
+        if: always()
+        run: az logout

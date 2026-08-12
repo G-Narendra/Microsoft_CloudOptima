@@ -21,6 +21,7 @@ Run with:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import time
@@ -406,9 +407,15 @@ def _render_input_form() -> None:
                 context=context,
                 settings=st.session_state.orchestrator.config,
             )
+            session = st.session_state.current_session
+            # Capture the orchestrator NOW — the lambda runs in a thread later,
+            # when st.session_state may no longer be reachable (the old code
+            # bound the method at thread creation for the same reason).
+            orchestrator = st.session_state.orchestrator
             st.session_state.thread = threading.Thread(
-                target=st.session_state.orchestrator.run,
-                args=(st.session_state.current_session,),
+                # run() is async (round-3 P1) — this bridge runs the coroutine
+                # inside the background thread so the UI keeps polling progress.
+                target=lambda: asyncio.run(orchestrator.run(session)),
                 daemon=True,
             )
             st.session_state.running = True
@@ -603,6 +610,38 @@ def _render_results(session: Session) -> None:
 # ── Entry point ─────────────────────────────────────────────────────────
 
 
+def _render_auth_gate(settings: Settings) -> None:
+    """Phase 15 scaffold — require a signed-in identity before the dashboard.
+
+    The external review's #1 production risk was "no authentication: anyone
+    who can reach the dashboard can run analyses and burn LLM credits." When
+    ``auth_enabled`` is false (demo/local, the default) this is a no-op so the
+    dashboard and its AppTest suite behave exactly as before. When enabled:
+
+    - Streamlit >= 1.42 exposes the native OIDC surface (``st.user`` /
+      ``st.login``) configured in ``.streamlit/secrets.toml`` — the same flow
+      documented for Azure App Service with Microsoft Entra ID.
+    - If the running Streamlit build has no login API, the app fails closed
+      with a clear message instead of silently serving unauthenticated
+      traffic.
+    """
+    if not settings.auth_enabled:
+        return
+    if hasattr(st, "user") and st.user.is_logged_in:
+        return
+    st.title("☁️ CloudOptima")
+    st.warning("This dashboard requires a Microsoft account to continue.")
+    if hasattr(st, "login"):
+        st.button("Sign in with Microsoft", on_click=st.login)
+    else:
+        st.error(
+            "Authentication is enabled (AUTH_ENABLED=true) but this Streamlit "
+            "build has no native login API. Upgrade to Streamlit >= 1.42 or "
+            "put Azure App Service Easy Auth in front of the app."
+        )
+    st.stop()
+
+
 def main() -> None:
     """Render the full dashboard page."""
     st.set_page_config(
@@ -614,6 +653,7 @@ def main() -> None:
 
     _init_state()
     _ensure_orchestrator()
+    _render_auth_gate(st.session_state.orchestrator.config)
     _render_sidebar()
 
     if not st.session_state.running:

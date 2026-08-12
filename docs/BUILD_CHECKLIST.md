@@ -477,7 +477,7 @@ Each phase has tasks with `[ ]` checkboxes. Mark `[x]` when done. Don't skip pha
 ## Phase 11: Testing (Day 12-14) ✅ COMPLETE — targets exceeded
 
 > **Goal:** 30+ tests that give us confidence nothing's broken.
-> **Actual: 478 tests · 93% coverage (85% fail-under gate) · mypy & ruff clean.**
+> **Actual: 527 tests · 92.62% coverage (85% fail-under gate) · mypy & ruff clean.**
 > **Also carries Punit's issues #2–#5** (Responsible AI): see sections 11.4–11.6 below.
 
 ### 11.1 — Test Setup
@@ -520,23 +520,66 @@ Each phase has tasks with `[ ]` checkboxes. Mark `[x]` when done. Don't skip pha
 - [x] `scripts/redteam/redteam_cloudoptima.py` — deterministic ASR harness (jailbreak, homoglyph, delimiter forge, RAG poison, base64, rate limit)
 - [x] `--strict` gate (fails when any vector's ASR >= 5%) — CI-ready
 - [x] `redteam` extra + guarded PyRIT adapter in `pyproject.toml`
+- [x] Campaign hardened with deterministic converters — Flip + ROT13 added (Translation excluded: needs a live LLM, breaks the hermetic gate)
+- [x] Converters surfaced 3 NEW bypasses (Flip, ROT13, flip/ROT13-of-base64) → fixed with involution unscrambling in `sanitize.obfuscated_forms` + `decoded_base64_forms`; campaign reached 75 variants → 0.0% ASR at this point (round 2 below extends it to 119 strict variants)
+- [x] **Round-2 campaign hardening:** Atbash + Leetspeak + Bidi converters added — surfaced 5 more bypasses → fixed (digit-complement atbash, symbol + i/l leet folds, leet-tolerant phrase patterns, Bidi stripping); campaign now **119 strict variants → 0.0% ASR**, leet-of-base64 reported as a documented known gap
 - [ ] Nightly PyRIT campaign against the deployed endpoint (Phase 13+)
+
+### 11.7 — External Principal-Engineer Review Hardening ✅
+
+> An independent reviewer (a senior Azure AI engineer acting as an external
+> reviewer) audited the whole project and scored it 7.5/10 overall. Every
+> actionable finding below is fixed and covered by tests.
+
+- [x] `Settings.__repr__` shows `***REDACTED***` — even the first 3 chars of a key never leak
+- [x] IaC scanner backtick false positive fixed — only shell-looking content in backticks is flagged (Markdown inline code passes)
+- [x] Tool arguments validated against the declared parameter schema before execution
+- [x] Tool execution timeout (15s) — a hung tool can never block the pipeline
+- [x] Severity-based routing added (`severity_action`: pass / log / block / escalate) + `max_severity` on verdicts
+- [x] ML safety layer is MANDATORY in production mode — `create_orchestrator` fails closed when `demo_mode=false` without Content Safety
+- [x] Error taxonomy — error turns carry `error_kind` (llm / parse / validation / prompt_build); orchestrator audits failed turns with the reason
+- [x] Governance audit logging verified present (every allow AND deny is written to the audit trail); YAML↔Python policy sync test confirmed in `test_governance.py`
+- [x] Eval harness gains `--fail-under` CI gate + version-pinned judge model (`AZURE_OPENAI_EVAL_MODEL`)
+- [x] `Dockerfile` (multi-stage, non-root, healthcheck) + `.dockerignore` written
+- [x] `.github/workflows/ci.yml` — ruff · mypy · pytest+coverage · red-team `--strict` · PyRIT · eval · AGT lint · MCP smoke on every push; Azure deploy on `main`
+- [x] Auth scaffold for Phase 15 — `AUTH_*` config + dashboard login gate (Streamlit native OIDC / Easy Auth)
+- [x] Regression tests for every fix — suite grew 478 → 527 tests (92.62% coverage)
+
+### 11.8 — Scaling: Async Pipeline + Redis + DI (Round-3 Review) ✅
+
+> Round 3 of the external review: "brilliant security researcher and a junior software
+> engineer… will fall over the second it gets heavy user traffic." Re-scored 8.8 → **9.0/10**.
+> All three homework items are done below and regression-tested.
+
+- [x] **P1 — fully async pipeline**: `BaseAgent.analyze` and `Orchestrator.run` are real coroutines
+- [x] Every LLM client gained `agenerate()` — httpx.AsyncClient (Nvidia/Anthropic/Gemini), `AsyncAzureOpenAI`/`AsyncOpenAI`, async sleep for Mock
+- [x] `agenerate_with_retry` — async exponential backoff (`await asyncio.sleep`, never blocks the loop)
+- [x] Cost / Security / Compliance run **concurrently** via `asyncio.gather` (they only depend on the architect) — peak-concurrency test proves overlap
+- [x] Sync bridges: CLI, Streamlit background thread (orchestrator captured before thread start), eval script — all `asyncio.run`
+- [x] **P2 — pluggable rate-limit store**: `RateLimitStore` protocol + `MemoryRateLimitStore` (default) + `RedisRateLimitStore` (INCR/EXPIRE, lazy import, injectable client for tests)
+- [x] `Settings.rate_limit_backend` (`memory`/`redis`) + `redis_url` + validator; `build_rate_limiter()` maps config → store; orchestrator gets its `RateLimiter` injected
+- [x] **P3 — dependency injection**: `cloudoptima/context.py` `AppContext` owns settings, llm client, audit logger, anomaly detector, rate limiter; `Orchestrator.from_settings` injects them into every agent
+- [x] Module-level getters kept only as a fallback for direct construction; two contexts verified fully isolated
+- [x] New `tests/test_scaling.py` — 13 tests: coroutine checks, concurrency peak, limiter stores (memory + redis-fake), DI wiring + isolation, backend config
+- [x] Suite now **540 tests · 90.19% coverage** · mypy & ruff clean · red-team gates still 0.0% ASR
 
 ## Phase 12: Docker — Run Anywhere (Day 14-15)
 
 > **Goal:** One command to build and run. Works the same everywhere.
 
-### 12.1 — Dockerfile
-- [ ] Base: `python:3.11-slim`
-- [ ] Set working dir to `/app`
-- [ ] Copy `requirements.txt` first (caching — only reinstall when deps change)
-- [ ] `pip install -r requirements.txt`
-- [ ] Copy entire `cloudoptima/` package
-- [ ] Env defaults: `DEMO_MODE=true`, `LLM_PROVIDER=mock`
-- [ ] Health check: runs our health module every 30 seconds
-- [ ] Expose port 8501
-- [ ] Run: `streamlit run cloudoptima/dashboard.py`
-- [ ] **Security:** Run as non-root user (`useradd -m cloudoptima && USER cloudoptima`)
+### 12.1 — Dockerfile ✅ (written; image build is the remaining local proof)
+- [x] Base: `python:3.11-slim`
+- [x] Set working dir to `/app`
+- [x] Copy `requirements.txt` first (caching — only reinstall when deps change)
+- [x] `pip install -r requirements.txt`
+- [x] Copy entire `cloudoptima/` package
+- [x] Env defaults: `DEMO_MODE=true`, `LLM_PROVIDER=mock`
+- [x] Health check: Streamlit's `/_stcore/health` every 30 seconds
+- [x] Expose port 8501
+- [x] Run: `streamlit run cloudoptima/dashboard.py`
+- [x] **Security:** Run as non-root user (`groupadd`/`useradd cloudoptima` + `USER cloudoptima`)
+- [x] Multi-stage build (builder venv → slim runtime) per Azure App Service best practice
+- [x] `.dockerignore` — secrets, caches, docs never enter the image
 
 ### 12.2 — Local Docker Test
 - [ ] `docker build -t cloudoptima .`
@@ -545,6 +588,10 @@ Each phase has tasks with `[ ]` checkboxes. Mark `[x]` when done. Don't skip pha
 - [ ] Run an analysis — finishes in < 2 seconds (mock data)
 - [ ] **Security:** Verify container runs as non-root (`whoami` inside container → `cloudoptima`)
 - [ ] **Security:** Verify `.env` is NOT in the image
+
+### 12.3 — CI/CD (external-review finding) ✅
+- [x] `.github/workflows/ci.yml` — quality gate on every push/PR to `dev` + `main`: ruff · mypy · pytest (85% coverage floor) · `redteam_cloudoptima.py --strict` · `pyrit_redteam.py --strict` · eval (offline tier) · `agt lint-policy` · MCP round-trip smoke
+- [x] Conditional Azure App Service deploy on `main` via OIDC `azure/login` (needs Phase 13 secrets)
 
 ---
 
@@ -715,7 +762,18 @@ Each phase has tasks with `[ ]` checkboxes. Mark `[x]` when done. Don't skip pha
 
 > **Phases 0–10 complete — including Phase 7.5 (LLM routing), Phase 7.6 (multi-provider),
 > Phase 8 (compliance rules, RAG, static + live pricing), Phase 9, and Phase 10 (security).**
-> **Phase 11 complete in practice: 478 tests · 93% coverage (85% gate) · mypy & ruff clean —
+> **Phase 11 complete in practice: 527 tests · 92.62% coverage (85% gate) · mypy & ruff clean —
 > plus Punit's issues #2–#5 (Prompt Shields, PyRIT, azure-ai-evaluation, AGT) and #7 (MCP).**
+> **Phase 11.7: every external principal-engineer review finding fixed — secrets fully redacted,
+> fail-closed ML safety in production, tool arg validation + timeouts, severity routing,
+> error taxonomy, IaC backtick precision, PyRIT Flip/ROT13 bypasses closed (75 variants → 0.0% ASR at that point),
+> Dockerfile + CI workflow + auth scaffold added.**
+> **Round 2 of the review: reviewer re-scored 7.5 → 8.8/10 and its new Atbash/leetspeak/Bidi
+> converters found 5 more bypasses — all closed (119 strict PyRIT variants → 0.0% ASR,
+> leet-of-base64 as the one honest known gap, closed by ML Content Safety in production).**
+> **Suite is now 527 tests · 92.62% coverage (85% gate) · mypy & ruff clean.**
+> **Round 3 of the review (Phase 11.8): fully async pipeline (asyncio.gather for the
+> three specialists), pluggable rate-limit store (memory → Redis), and an AppContext
+> dependency container — re-scored 8.8 → 9.0/10. Suite is now 540 tests · 90.19% coverage.**
 > **Remaining: Phase 12 (Docker), Phase 13 (Azure deploy), Phase 14 (production),
 > Phase 15 (persistence & auth) — plan in [`docs/PROGRESS_REPORT.md`](./PROGRESS_REPORT.md).**

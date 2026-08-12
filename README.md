@@ -23,7 +23,7 @@ Microsoft_CloudOptima is a multi-agent AI system that helps you design cloud arc
 
 ---
 
-## 🚧 Current Status — Phases 0–11 Complete + Punit's Issues Resolved
+## 🚧 Current Status — Phases 0–11.8 Complete + Punit's Issues Resolved
 
 | Phase | Status |
 |-------|--------|
@@ -41,7 +41,9 @@ Microsoft_CloudOptima is a multi-agent AI system that helps you design cloud arc
 | Phase 9 — Logging & Health Checks | ✅ **Done** (audit logging, @trace, health registry) |
 | Phase 10 — Security | ✅ **Done** (output jailbreak scanning, anomaly detection, strict schemas, static pricing, rate limiting enforced, 27 penetration tests) |
 | Punit's issues #2–#7 | ✅ **Done** (real Microsoft frameworks: Prompt Shields REST, PyRIT 0.14, azure-ai-evaluation, AGT PolicyEngine, MCP tools — full story in [PROGRESS_REPORT](./docs/PROGRESS_REPORT.md)) |
-| Phase 11 — Testing | ✅ **Done** (478 tests · 93% coverage · mypy & ruff clean) |
+| Phase 11 — Testing | ✅ **Done** (540 tests · 90.19% coverage · mypy & ruff clean) |
+| Phase 11.7 — External review hardening | ✅ **Done** (every finding fixed + regression-tested; reviewer re-scored 7.5 → **8.8/10**) |
+| Phase 11.8 — Scaling (round-3 review) | ✅ **Done** (fully async pipeline — `BaseAgent.analyze`/`Orchestrator.run` are coroutines, Cost/Security/Compliance run in parallel via `asyncio.gather`; rate limiter now has a pluggable store — `memory` or `redis`; `AppContext` dependency container replaces hidden module globals; reviewer re-scored **8.8 → 9.0/10**) |
 | Phase 12–15 | 📅 Planned (Docker → Azure deploy → production → persistence & auth) |
 
 📋 **Full build checklist:** See [`docs/BUILD_CHECKLIST.md`](./docs/BUILD_CHECKLIST.md)
@@ -86,6 +88,57 @@ python -c "import cloudoptima; print('CloudOptima v' + cloudoptima.__version__)"
 
 > **Note:** `chromadb` is optional — only needed for Phase 8 (Compliance RAG). Don't worry if you see it commented out in `requirements.txt`.
 
+### 🔄 Commands to run after pulling (for Andrew & Ivan)
+
+Every time you pull new work from `dev`, do this in order:
+
+```cmd
+:: 1 — Get the latest work
+git pull origin dev
+
+:: 2 — Make sure your environment is up to date
+.venv\Scripts\activate
+pip install -r requirements.txt
+pip install -e .
+
+:: 3 — Copy the env template (only needed the FIRST time)
+copy .env.example .env
+
+:: 4 — Prove the pull didn't break anything (expect 540 passed)
+python -m pytest -q
+
+:: 5 — Run the security gates before you trust your local run
+python scripts/redteam/redteam_cloudoptima.py --strict
+
+:: 6 — Launch the dashboard
+streamlit run cloudoptima/dashboard.py
+```
+
+> Bash/Mac users: replace `.venv\Scripts\activate` with `source .venv/bin/activate`
+> and `copy` with `cp`.
+
+---
+
+## 🧪 Run & Test Locally
+
+Everything below runs from the project root with the virtual environment active.
+
+| What | Command | Expect |
+|---|---|---|
+| Full test suite | `python -m pytest -q` | **540 passed · 90.19% coverage** (85% gate) |
+| Type check | `python -m mypy cloudoptima/` | `Success: no issues found` |
+| Lint | `python -m ruff check cloudoptima/ scripts/` | `All checks passed` |
+| Deterministic red-team gate | `python scripts/redteam/redteam_cloudoptima.py --strict` | `0.0% ASR` (16 vectors) |
+| PyRIT campaign | `python scripts/redteam/pyrit_redteam.py --strict` | `0.0% ASR` (119 variants) |
+| CLI — one analysis | `echo '{"project_name": "E-Shop", "user_prompt": "Design a scalable web app"}' \| python -m cloudoptima.app` | Prints the full session JSON |
+| Dashboard | `streamlit run cloudoptima/dashboard.py` | Opens in your browser on :8501 |
+
+> **First run is slower (~15s):** the cost analyst fetches **real prices** from the
+> Azure Retail Prices API on the first analysis of each process. After that the pricing
+> cache makes every run sub-second — that's the "no mock data" choice on purpose.
+> Demo mode (`DEMO_MODE=true`, the default) uses MockClient for the LLM but still
+> fetches real prices when the design mentions Azure services.
+
 ---
 
 ## Architecture Overview
@@ -94,64 +147,74 @@ Here's the whole system as one picture — rendered live by GitHub:
 
 ```mermaid
 flowchart TD
-    U["💬 You describe your infrastructure in plain English"]
-    F["🖥️ Streamlit input form<br/>region · budget · compliance frameworks"]
-    S["🧼 Sanitizer<br/>injection · XSS · SQLi · null bytes"]
-    O["⚙️ Orchestrator<br/>runs pipeline · detects conflicts · enforces budget"]
+    U["💬 You describe your infra in plain English"]
+    F["🖥️ Streamlit form<br/>project · region · budget · frameworks"]
+    S["🧼 Sanitizer — front door<br/>clean_input · injection scan · Bidi / Atbash / leet defense"]
+    RL{"🛑 Rate-limit gate<br/>memory store or shared Redis"}
+    O["⚙️ Orchestrator (async)<br/>DAG runner · conflict detection · artifact builder"]
 
-    U --> F --> S --> O
+    U --> F --> S --> RL --> O
+    RL -- "quota exhausted → rejected, zero API cost" --> X["🚫 Try again in ~an hour"]
 
-    subgraph PIPELINE["5-agent pipeline"]
+    subgraph PIPELINE["5-agent brain — async DAG"]
         direction TB
         A["🏗️ Architect<br/>compute · storage · network · data"]
-        C["💰 Cost Analyst<br/>grounded with live Azure Retail Prices"]
-        SE["🔐 Security Engineer<br/>risk scan · IaC malware scan"]
+        C["💰 Cost Analyst<br/>grounded in live Azure Retail Prices"]
+        SE["🔐 Security Engineer<br/>findings · risk rating"]
         CO["📜 Compliance Officer<br/>21 rules + RAG"]
-        J["⚖️ Judge<br/>arbitrates conflicts"]
+        J["⚖️ Judge<br/>arbitrates the specialists"]
 
-        A --> C
-        A --> SE
-        A --> CO
-        C --> J
-        SE --> J
-        CO --> J
+        A -- "design" --> C
+        A -- "design" --> SE
+        A -- "design" --> CO
+        C -- "cost" --> J
+        SE -- "risk" --> J
+        CO -- "verdict" --> J
     end
 
-    O --> A
+    O -- "1️⃣ architect runs first" --> A
+    O -. "2️⃣ cost · security · compliance run IN PARALLEL (asyncio.gather)" .- C
+    O -. "3️⃣ then the judge arbitrates" .- J
 
-    subgraph ROUTER["LLM router (phases 7.5–7.6)"]
+    subgraph SIDE["Every call passes through these layers"]
         direction LR
-        R1["Nvidia NIM<br/>free tier"]
-        R2["Azure OpenAI"]
-        R3["OpenAI"]
-        R4["Anthropic Claude"]
-        R5["Google Gemini"]
+        RT["🔄 Cost-aware router<br/>cheapest healthy provider · failover · spend cap"]
+        CA["🗄️ LLM cache<br/>SHA-256 key · TTL · poisoned-output safe"]
+        OB["👁️ Observability<br/>append-only audit · @trace · anomaly detector"]
+        ML["🛡️ Content Safety + Prompt Shields<br/>ML moderation (mandatory in production)"]
+        GOV["📏 Tool governance + MCP<br/>allow / deny policy · live-pricing tool"]
     end
 
-    PIPELINE -. "every agent call → cheapest healthy provider · auto-failover · gzip cache" .-> ROUTER
+    PIPELINE -. "each agent call" .-> RT
+    RT -. "reuse cached answer?" .-> CA
+    PIPELINE -. "inputs & outputs" .-> S
+    PIPELINE -. "every event logged" .-> OB
+    S -. "semantic verdict" .-> ML
+    C -. "price lookup" .-> GOV
 
-    J --> T1["🏗️ IaC templates"]
+    J --> T1["🏗️ IaC template (Bicep — malware-scanned)"]
     J --> T2["💰 Cost forecast + savings"]
     J --> T3["🔐 Security report"]
-    J --> T4["📜 Compliance status"]
-
+    J --> T4["📜 Compliance report"]
     T1 & T2 & T3 & T4 --> D["📊 Results dashboard<br/>Overview · Agents · Conflicts · Artifacts"]
     D --> E["📥 Downloads · 📈 session history · 🧾 audit logs"]
 
     classDef input fill:#e8f0fe,stroke:#4285f4,stroke-width:1px;
     classDef agents fill:#fef7e0,stroke:#f9ab00,stroke-width:1px;
-    classDef router fill:#fce8e6,stroke:#ea4335,stroke-width:1px;
+    classDef side fill:#fce8e6,stroke:#ea4335,stroke-width:1px;
     classDef out fill:#f3e8fd,stroke:#a142f4,stroke-width:1px;
-    class U,F,S,O input;
+    class U,F,S,RL,O input;
     class PIPELINE agents;
-    class ROUTER router;
-    class T1,T2,T3,T4,D,E out;
+    class SIDE side;
+    class T1,T2,T3,T4,D,E,X out;
 ```
 
-> **How to read it:** the orange box is the 5-agent brain, the red box is the cost-aware
-> LLM router underneath it — every agent call is routed to the *cheapest healthy
-> provider* with automatic failover. The purple boxes are the four artifacts the
-> pipeline produces for every run.
+> **How to read it:** the orange box is the 5-agent brain — the architect runs first,
+> then cost / security / compliance run **in parallel** (async pipeline), and the judge
+> arbitrates last. The red box is every cross-cutting layer every call passes through:
+> the cost-aware router (cheapest healthy provider + failover), the LLM cache, the
+> audit/anomaly observability, the ML Content Safety + Prompt Shields layer, and tool
+> governance over MCP. The purple boxes are the four artifacts produced per run.
 
 ---
 
@@ -210,7 +273,7 @@ Microsoft_CloudOptima/
 │   ├── safety.py             # Azure Content Safety + Prompt Shields REST (issue #2)
 │   ├── mcp_server.py         # FastMCP server — stdio transport (issue #7)
 │   ├── mcp_bridge.py         # MCP client with in-process registry fallback (issue #7)
-│   └── tests/                # 478 tests · 93% coverage
+│   └── tests/                # 540 tests · 90.19% coverage
 │
 ├── scripts/                  # Responsible-AI harnesses (issues #3, #4)
 │   ├── evaluate/             # azure-ai-evaluation + offline F1/Rouge
@@ -241,4 +304,4 @@ See [`docs/BUILD_CHECKLIST.md`](./docs/BUILD_CHECKLIST.md) → Phase 10 for full
 
 ---
 
-*Phases 0–11 complete — the full 5-agent pipeline runs through the Streamlit dashboard (real progress, 4 result tabs, downloadable artifacts). Compliance & pricing (Phase 8) bring immutable rules, RAG-guided checks, and live Azure prices; the router (7.5–7.6) spans five LLM providers with cheapest-first failover; Phase 10 hardening covers jailbreak scanning, anomaly detection, strict schemas, and enforced rate limiting. All six of Punit's review issues are resolved with the real Microsoft frameworks — Prompt Shields (REST), a PyRIT 0.14 campaign (0% ASR), azure-ai-evaluation metrics, AGT PolicyEngine governance, and MCP tools — backed by 478 tests at 93% coverage. Ready for the deployment phases (12–14) and persistence/auth (15). See [docs/PROGRESS_REPORT.md](./docs/PROGRESS_REPORT.md).*
+*Phases 0–11.8 complete — the full 5-agent pipeline runs through the Streamlit dashboard (real progress, 4 result tabs, downloadable artifacts). Compliance & pricing (Phase 8) bring immutable rules, RAG-guided checks, and live Azure prices (real Retail Prices API, cached ~1h); the router (7.5–7.6) spans five LLM providers with cheapest-first failover; Phase 10 hardening covers jailbreak scanning, anomaly detection, strict schemas, and enforced rate limiting. All six of Punit's review issues are resolved with the real Microsoft frameworks — Prompt Shields (REST), a PyRIT 0.14 campaign (**119 strict variants → 0.0% ASR**, leet-of-base64 documented as the one honest known gap), azure-ai-evaluation metrics, AGT PolicyEngine governance, and MCP tools. An external principal-engineer review went **7.5 → 9.0/10** across three rounds — round 2 fixed every security finding (secret redaction, fail-closed ML safety, Bidi stripping, Atbash/leetspeak involutions, tool validation, severity routing, error taxonomy, Docker, CI, auth scaffold); round 3 delivered the scaling homework: a **fully async pipeline** (`asyncio.gather` runs the three specialists concurrently — verified by a peak-concurrency test), a **pluggable rate-limit store** (memory → Redis for scale-out), and an **`AppContext` dependency container** replacing hidden module globals — backed by **540 tests at 90.19% coverage**. Ready for the deployment phases (12–14) and persistence/auth (15). See [docs/PROGRESS_REPORT.md](./docs/PROGRESS_REPORT.md).*

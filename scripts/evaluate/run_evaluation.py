@@ -28,6 +28,8 @@ Usage:
 
 from __future__ import annotations
 
+import argparse
+import asyncio
 import json
 import os
 import sys
@@ -92,7 +94,9 @@ def pipeline_target(query: str, context: str) -> dict[str, str]:
 
     session = Session(project_name="eval-workload", user_prompt=query, services=context)
     orchestrator = create_orchestrator(Settings())
-    result = orchestrator.run(session)
+    # run() is async (round-3 P1) — this script is a plain sync process, so
+    # asyncio.run bridges into the parallel pipeline.
+    result = asyncio.run(orchestrator.run(session))
 
     summary: dict[str, object] = {"project": session.project_name}
     for turn in result.agent_turns:
@@ -104,22 +108,52 @@ def pipeline_target(query: str, context: str) -> dict[str, str]:
     return {"response": json.dumps(summary, default=str, ensure_ascii=False)}
 
 
-def _model_config() -> dict[str, str] | None:
-    """Judge-model config from env; ``None`` when the judge is not configured."""
+def _model_config(judge_model: str = "") -> dict[str, str] | None:
+    """Judge-model config from env; ``None`` when the judge is not configured.
+
+    ``judge_model`` pins the judge model name (``AZURE_OPENAI_EVAL_MODEL``) so
+    score drift from judge-model updates can never create phantom regressions
+    — the same metric must come from the same judge (external review finding).
+    """
     endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
     api_key = os.environ.get("AZURE_OPENAI_API_KEY", "")
     deployment = os.environ.get("AZURE_OPENAI_EVAL_DEPLOYMENT", "")
     if not (endpoint and api_key and deployment):
         return None
-    return {
+    config = {
         "azure_endpoint": endpoint,
         "api_key": api_key,
         "azure_deployment": deployment,
     }
+    if judge_model:
+        config["model"] = judge_model
+    return config
 
 
 def main() -> int:
-    """Run the evaluation and write results to ``results/latest_eval.json``."""
+    """Run the evaluation and write results to ``results/latest_eval.json``.
+
+    ``--fail-under`` turns the harness into a CI gate: when the mean of the
+    available numeric metrics drops below the threshold the script exits
+    non-zero, so a quality regression blocks deployment instead of being
+    reported in a JSON file nobody reads.
+    """
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--fail-under",
+        type=float,
+        default=None,
+        metavar="SCORE",
+        help="exit non-zero when the mean of the available numeric metrics is below SCORE",
+    )
+    parser.add_argument(
+        "--judge-model",
+        default=os.environ.get("AZURE_OPENAI_EVAL_MODEL", ""),
+        metavar="NAME",
+        help="pin the judge model name (default: $AZURE_OPENAI_EVAL_MODEL)",
+    )
+    args = parser.parse_args()
+
     try:
         from azure.ai.evaluation import (
             CoherenceEvaluator,
@@ -146,7 +180,7 @@ def main() -> int:
         print(f"no prompts found in {DATA_PATH.name}")
         return 2
 
-    model_config = _model_config()
+    model_config = _model_config(args.judge_model)
     evaluators: dict[str, object] = {
         "f1": F1ScoreEvaluator(),
         "rouge": RougeScoreEvaluator(rouge_type=RougeType.ROUGE_L),
@@ -221,12 +255,30 @@ def main() -> int:
     out = RESULTS_DIR / "latest_eval.json"
     out.write_text(
         json.dumps(
-            {"metrics": metrics, "samples": len(prompts), "judge_used": model_config is not None},
+            {
+                "metrics": metrics,
+                "samples": len(prompts),
+                "judge_used": model_config is not None,
+                "judge_model": args.judge_model or None,
+            },
             indent=2,
         ),
         encoding="utf-8",
     )
     print(f"\nResults written to {out}")
+
+    # CI gate: fail when the mean of the available numeric metrics drops below
+    # the threshold. Tracked baselines belong in the results JSON so Punit can
+    # compare runs.
+    if args.fail_under is not None and counted:
+        mean = overall / counted
+        if mean < args.fail_under:
+            print(
+                f"\nFAIL: mean metric {mean:.3f} is below --fail-under "
+                f"{args.fail_under} — quality regression, gate blocked",
+                file=sys.stderr,
+            )
+            return 3
     return 0
 
 

@@ -17,7 +17,7 @@
 | Issue | What Punit asked for | The actual Microsoft/industry package used | Live verification (this machine) |
 |---|---|---|---|
 | **#2** | Azure AI Content Safety **+ Prompt Shields** | `azure-ai-contentsafety` SDK for moderation · **Prompt Shields via the real REST `text:shieldPrompt` endpoint** (`httpx`, `Ocp-Apim-Subscription-Key`) | moderation SDK wired; shield REST path tested with mocked responses; graceful fallback to offline floor + regex
-| **#3** | **PyRIT** + AI Red Teaming at scale | `pyrit` 0.14 — custom `PromptTarget`, `UnicodeConfusableConverter` + `Base64Converter`, `SubStringScorer`, `SQLiteMemory` | campaign drives 45 variants → **0.0% ASR**; it found + we fixed the short-base64 gap (`decode_base64_tokens` in `sanitize.py`)
+| **#3** | **PyRIT** + AI Red Teaming at scale | `pyrit` 0.14 — custom `PromptTarget`, converters (UnicodeConfusable, Base64, Flip, ROT13, Atbash, Leetspeak, Bidi), `SubStringScorer`, `SQLiteMemory` | campaign drives **119 strict variants → 0.0% ASR** (leet-of-base64 = documented known gap); each round it found + we fixed a real gap (short-base64, Flip/ROT13, Atbash/leet/Bidi)
 | **#4** | **Azure AI Evaluation SDK** | `azure-ai-evaluation` `evaluate()` — `F1ScoreEvaluator`, `RougeScoreEvaluator` (always on) + `Groundedness/Relevance/Coherence` + safety evaluators (judge configured) | real numbers written to `results/latest_eval.json` with **no API key needed** (offline tier)
 | **#5** | **AGT** runtime control + auditability | `agent-governance-toolkit(-core)` — `agentmesh.governance.PolicyEngine` loads `policies/tools.yaml` at runtime; `agt lint-policy` passes clean | `check_action` consults the real AGT engine (`AGT_AVAILABLE=True`): price→allow, deploy→deny
 | **#7** | **MCP** tool-driven agents | official `mcp` SDK — `MCPServer` (v2) + stdio `ClientSession` bridge | `bridge.call_tool('list_regions')` → `source: 'mcp'` full protocol round-trip
@@ -25,7 +25,11 @@
 
 Every tool call also passes through governance + output sanitization, and the
 whole responsible-AI loop is gated in CI (deterministic red-team `--strict`,
-478 unit tests, mypy strict, ruff).
+527 unit tests, mypy strict, ruff). An independent external principal-engineer
+review (see `docs/PROGRESS_REPORT.md` §2.5) went 7.5 → **8.8/10** across two
+rounds; every finding — including real PyRIT bypasses (Flip/ROT13, then
+Atbash/leetspeak/Bidi) — is fixed with a regression test, and the suite grew
+from 478 to 527 tests.
 
 ---
 
@@ -74,8 +78,8 @@ agreed implementation.
 | **#2** | **3** (Input/Output Sanitization) + **10** (Security) | Regex sanitization, injection detection, homoglyph normalization | ML-based moderation + Prompt Shields (user-prompt & document/indirect attacks) | Depth-of-defense gap (regex only) |
 
 **Implementation owners (team notes):** Phase 0 (repo + checklists) — Narendra · Phase 1 — Ivan ·
-Phases 2–3 — Andrew · Phases 4–10 — Narendra · Phase 11 — Narendra + team review (478 tests, 93% coverage) ·
-Issues #2–#7 — Narendra + team review.
+Phases 2–3 — Andrew · Phases 4–10 — Narendra · Phase 11 — Narendra + team review (527 tests, 92.62% coverage) ·
+Issues #2–#7 — Narendra + team review · External-review hardening (11.7) — Narendra.
 
 **Takeaway:** the checklists were defined up front, and none of the six issues appeared
 in any Phase 1–10 checklist — so the gaps are in **phase definition**, not execution.
@@ -227,7 +231,7 @@ dependency weight · learning value · Azure alignment):
 
 | Option | Determinism | Testability | Dependencies | Azure alignment | Verdict |
 |---|---|---|---|---|---|
-| **Custom orchestrator (current)** | ✅ Full — explicit loop | ✅ 478 tests | 0 | Neutral | **Recommended (for now)** |
+| **Custom orchestrator (current)** | ✅ Full — async DAG (`asyncio.gather`, round-3 P1) | ✅ 540 tests | 0 | Neutral | **Recommended (for now)** |
 | **Microsoft Agent Framework (MAF)** | ✅ `WorkflowBuilder` supersteps (BSP) | ✅ | `agent-framework` (new) | ✅ Native | Strong candidate at deployment |
 | **LangGraph** | ✅ StateGraph | ✅ | langgraph | Neutral | Overkill for a fixed linear DAG |
 | **LangChain** | ⚠️ abstraction-heavy | ⚠️ | Large | Neutral | Rejected (original plan, outgrown) |
@@ -359,7 +363,7 @@ SexualEvaluator, SelfHarmEvaluator, PromptShieldEvaluator** (safety). Evaluation
 project required — and optionally logs results to an Azure AI Foundry project dashboard.
 
 ### 6.3 Where we are today
-- `cloudoptima/tests/` — 478 unit tests, 93% coverage: schemas, injection, caching,
+- `cloudoptima/tests/` — 510 unit tests, 93% coverage: schemas, injection, caching,
   routing, pricing, compliance rules, safety, governance, red-teaming.
 - **No evaluation of output quality.** The judge agent arbitrates conflicts, but there
   is no metric like "relevance of the architecture to the user's prompt."

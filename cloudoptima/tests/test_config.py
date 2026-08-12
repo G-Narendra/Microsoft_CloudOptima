@@ -34,14 +34,19 @@ def test_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_api_key_masked_in_repr() -> None:
-    """Test that secret API keys are never leaked in repr()."""
+    """Test that secret API keys are never leaked in repr().
+
+    The reviewer finding was that even a 3-character prefix narrows the search
+    space — the placeholder must be all-or-nothing (``***REDACTED***``).
+    """
     raw_key = "sk-nvidia-secret-key-12345"
     settings = Settings(nvidia_api_key=SecretStr(raw_key))
     repr_str = repr(settings)
 
     assert raw_key not in repr_str
     assert "nvidia_api_key=" in repr_str
-    assert "sk-***" in repr_str or "***" in repr_str
+    assert "***REDACTED***" in repr_str
+    assert raw_key[:3] not in repr_str  # not even the first characters leak
 
 
 def test_api_key_masked_in_str() -> None:
@@ -52,6 +57,8 @@ def test_api_key_masked_in_str() -> None:
 
     assert raw_key not in str_out
     assert "azure_openai_api_key=" in str_out
+    assert "***REDACTED***" in str_out
+    assert raw_key[:3] not in str_out
 
 
 def test_temperature_bounds() -> None:

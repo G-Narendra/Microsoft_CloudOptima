@@ -36,8 +36,9 @@ from abc import ABC, abstractmethod
 from typing import Any, Final
 
 from cloudoptima.config import Settings
+from cloudoptima.context import AppContext
 from cloudoptima.llm_cache import LLMCache
-from cloudoptima.llm_client import BaseLLMClient, generate_with_retry
+from cloudoptima.llm_client import BaseLLMClient, agenerate_with_retry
 from cloudoptima.models import AgentTurn, AgentType, Session
 from cloudoptima.observability import TraceEvent, get_anomaly_detector, get_audit_logger
 from cloudoptima.sanitize import (
@@ -86,6 +87,7 @@ class BaseAgent(ABC):
         agent_type: AgentType,
         llm_client: BaseLLMClient,
         config: Settings,
+        context: AppContext | None = None,
     ) -> None:
         """Inject the agent's role, LLM backend, and settings.
 
@@ -93,10 +95,19 @@ class BaseAgent(ABC):
             agent_type: The :class:`AgentType` this agent represents.
             llm_client: An :class:`BaseLLMClient` implementation (Mock/Nvidia/Azure).
             config:     The application :class:`Settings` (cache, model, limits).
+            context:    Optional :class:`AppContext` (round-3 P3). When given,
+                its audit logger and anomaly detector are used instead of the
+                module-level singletons, so two pipelines in one process stay
+                fully isolated. Falls back to the globals when ``None`` so
+                direct construction in tests keeps working.
         """
         self.agent_type = agent_type
         self.llm_client = llm_client
         self.config = config
+        # Round-3 P3: owned dependencies beat hidden globals — but only when
+        # a context is provided; None keeps the old singleton behavior.
+        self._audit_logger = context.audit_logger if context is not None else None
+        self._anomaly_detector = context.anomaly_detector if context is not None else None
         self._cache = LLMCache(
             ttl_hours=config.cache_ttl_hours,
             max_size_mb=config.cache_max_size_mb,
@@ -104,10 +115,12 @@ class BaseAgent(ABC):
 
     # ── Template method — do not override in subclasses ──────────────────
 
-    def analyze(self, session: Session) -> AgentTurn:
+    async def analyze(self, session: Session) -> AgentTurn:
         """Run the full analysis pipeline and return an :class:`AgentTurn`.
 
-        Template-method skeleton shared by every agent:
+        Template-method skeleton shared by every agent (async since the
+        round-3 review P1 — an LLM call is network I/O, and awaiting it lets
+        the orchestrator run the three specialists in parallel):
 
         1. Build the prompt via :meth:`_build_prompt` (subclass responsibility);
            user-supplied values are cleaned and wrapped in ``--- FIELD ---``
@@ -116,7 +129,7 @@ class BaseAgent(ABC):
            detection copy so the scanner does not self-match its own patterns)
            and write them to the audit trail.
         3. Check the cache — a hit short-circuits straight to step 8.
-        4. Call the LLM with retry logic (:func:`generate_with_retry`).
+        4. Call the LLM with async retry logic (:func:`agenerate_with_retry`).
         5. Audit-log the raw response, then clean it with :func:`clean_output`.
         6. Extract JSON (:func:`extract_json`) and validate it via
            :meth:`_validate_output` (subclass responsibility).
@@ -142,7 +155,9 @@ class BaseAgent(ABC):
             _logger.warning(
                 "Agent %s failed to build prompt: %s", self.agent_type.value, exc
             )
-            return self._error_turn(f"prompt build failed: {exc}")
+            return self._error_turn(
+                f"prompt build failed: {exc}", error_kind="prompt_build"
+            )
 
         # Scan for injection attempts. The prompt keeps its ``--- FIELD ---``
         # markers (a whole-prompt clean_input would strip them — they match the
@@ -162,7 +177,7 @@ class BaseAgent(ABC):
             return self._build_turn(cached, latency)
 
         try:
-            raw = generate_with_retry(
+            raw = await agenerate_with_retry(
                 self.llm_client, prompt, guarded_prompt, max_retries=MAX_RETRIES
             )
         except Exception as exc:
@@ -173,7 +188,10 @@ class BaseAgent(ABC):
                 exc,
             )
             latency = (time.monotonic() - start) * 1000
-            return self._error_turn(f"LLM call failed: {exc}", latency)
+            # Transient by nature: a retry or a provider failover is the right
+            # response, not a schema change. error_kind lets the orchestrator
+            # tell "LLM was down" from "model output was bad".
+            return self._error_turn(f"LLM call failed: {exc}", latency, error_kind="llm")
 
         # Audit the raw response BEFORE cleaning: the log is the forensic record
         # of exactly what the model returned. clean_output strips HTML and
@@ -305,18 +323,24 @@ class BaseAgent(ABC):
         """
         data = extract_json(response)
         if data is None:
-            return self._error_turn("LLM output contained no parseable JSON", latency_ms)
+            return self._error_turn(
+                "LLM output contained no parseable JSON", latency_ms, error_kind="parse"
+            )
         if not isinstance(data, dict):
             return self._error_turn(
-                f"LLM output parsed to {type(data).__name__}, expected dict", latency_ms
+                f"LLM output parsed to {type(data).__name__}, expected dict",
+                latency_ms,
+                error_kind="parse",
             )
         try:
             valid, message = self._validate_output(data)
         except Exception as exc:
             _logger.warning("Agent %s validator raised: %s", self.agent_type.value, exc)
-            return self._error_turn(f"validation error: {exc}", latency_ms)
+            return self._error_turn(
+                f"validation error: {exc}", latency_ms, error_kind="validation"
+            )
         if not valid:
-            return self._error_turn(message, latency_ms)
+            return self._error_turn(message, latency_ms, error_kind="validation")
         return AgentTurn(
             agent_type=self.agent_type,
             output=data,
@@ -324,11 +348,30 @@ class BaseAgent(ABC):
             tokens_used=tokens_used,
         )
 
-    def _error_turn(self, message: str, latency_ms: float = 0.0) -> AgentTurn:
-        """Build an error :class:`AgentTurn` carrying ``{"error": message}``."""
+    def _error_turn(
+        self,
+        message: str,
+        latency_ms: float = 0.0,
+        error_kind: str = "unknown",
+    ) -> AgentTurn:
+        """Build an error :class:`AgentTurn` carrying ``{"error": message}``.
+
+        ``error_kind`` classifies the failure (``prompt_build`` / ``llm`` /
+        ``parse`` / ``validation``) so the orchestrator can tell a transient
+        LLM outage apart from a bad model response and route them differently
+        (retry / failover vs. escalate). The external review called out the
+        lack of an error taxonomy — this is that distinction, in every error
+        turn.
+
+        Args:
+            message:    The human-readable error.
+            latency_ms: Wall-clock time spent, in milliseconds.
+            error_kind: Failure category (``prompt_build``, ``llm``, ``parse``,
+                ``validation``, or ``unknown``).
+        """
         return AgentTurn(
             agent_type=self.agent_type,
-            output={"error": message},
+            output={"error": message, "error_kind": error_kind},
             latency_ms=round(latency_ms, 2),
             tokens_used=0,
         )
@@ -351,7 +394,7 @@ class BaseAgent(ABC):
                 "truncated": truncated,
             },
         )
-        get_audit_logger().log(event)
+        (self._audit_logger or get_audit_logger()).log(event)
 
     def _log_injection(self, session: Session) -> None:
         """Record a detected prompt-injection attempt in the audit trail."""
@@ -367,7 +410,7 @@ class BaseAgent(ABC):
             session_id=session.session_id,
             extra={"action": "sanitized_and_continued"},
         )
-        get_audit_logger().log(event)
+        (self._audit_logger or get_audit_logger()).log(event)
 
     def _scan_output(self, session: Session, raw: str, tokens_used: int) -> list[str]:
         """Phase 10 output defenses: jailbreak scan + anomaly tracking.
@@ -391,7 +434,7 @@ class BaseAgent(ABC):
         content_flags = scan_llm_output(raw)
         anomaly_flags: list[str] = []
         try:
-            anomaly_flags = get_anomaly_detector().record(
+            anomaly_flags = (self._anomaly_detector or get_anomaly_detector()).record(
                 self.agent_type.value, len(raw), tokens_used
             )
         except Exception:
@@ -412,7 +455,7 @@ class BaseAgent(ABC):
             session_id=session.session_id,
             extra={"flags": all_flags},
         )
-        get_audit_logger().log(event)
+        (self._audit_logger or get_audit_logger()).log(event)
         return content_flags
 
     @staticmethod

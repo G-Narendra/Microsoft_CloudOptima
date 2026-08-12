@@ -6,6 +6,7 @@ injection handling, graceful bad-JSON, and cache reuse on repeated calls.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -123,7 +124,7 @@ def test_agent_attributes() -> None:
 def test_analyze_returns_valid_turn() -> None:
     """MockClient run produces a valid, non-empty AgentTurn."""
     agent = _PassAgent(AgentType.ARCHITECT, MockClient(), Settings())
-    turn = agent.analyze(_make_session())
+    turn = asyncio.run(agent.analyze(_make_session()))
 
     assert isinstance(turn, AgentTurn)
     assert turn.agent_type == AgentType.ARCHITECT
@@ -139,8 +140,8 @@ def test_second_call_served_from_cache() -> None:
     agent = _PassAgent(AgentType.ARCHITECT, recording, Settings())
 
     session = _make_session()
-    first = agent.analyze(session)
-    second = agent.analyze(session)
+    first = asyncio.run(agent.analyze(session))
+    second = asyncio.run(agent.analyze(session))
 
     assert recording.call_count == 1
     assert first.output == second.output
@@ -158,8 +159,8 @@ def test_injection_echo_response_not_cached() -> None:
     agent = _PassAgent(AgentType.ARCHITECT, recording, Settings())
 
     session = _make_session()
-    first = agent.analyze(session)
-    second = agent.analyze(session)
+    first = asyncio.run(agent.analyze(session))
+    second = asyncio.run(agent.analyze(session))
 
     assert "error" not in first.output  # schema-valid — pipeline survives
     assert recording.call_count == 2  # never served from cache
@@ -169,7 +170,7 @@ def test_injection_echo_response_not_cached() -> None:
 def test_bad_json_returns_error_turn() -> None:
     """Unparseable LLM output yields an error turn instead of a crash."""
     agent = _PassAgent(AgentType.ARCHITECT, _InvalidJsonClient(), Settings())
-    turn = agent.analyze(_make_session())
+    turn = asyncio.run(agent.analyze(_make_session()))
 
     assert "error" in turn.output
     assert turn.latency_ms >= 0
@@ -178,7 +179,7 @@ def test_bad_json_returns_error_turn() -> None:
 def test_raising_validator_returns_error_turn() -> None:
     """A buggy subclass validator must not crash the pipeline."""
     agent = _RaisingValidatorAgent(AgentType.ARCHITECT, MockClient(), Settings())
-    turn = agent.analyze(_make_session())
+    turn = asyncio.run(agent.analyze(_make_session()))
 
     assert "error" in turn.output
     assert "validation error" in turn.output["error"]
@@ -189,12 +190,12 @@ def test_validation_failure_returns_error_turn() -> None:
     recording = _RecordingClient(MockClient())
     agent = _StrictAgent(AgentType.SECURITY, recording, Settings())
 
-    turn = agent.analyze(_make_session())
+    turn = asyncio.run(agent.analyze(_make_session()))
     assert "error" in turn.output
     assert "schema violation" in turn.output["error"]
 
     # Error turns must never be cached — the next call hits the LLM again.
-    agent.analyze(_make_session())
+    asyncio.run(agent.analyze(_make_session()))
     assert recording.call_count == 2
 
 
@@ -211,7 +212,7 @@ def test_injection_in_user_fields_is_detected() -> None:
     prompt = agent._build_prompt(session)
     assert detect_injection(_DELIMITER_MARKER.sub("", prompt)) is True
 
-    turn = agent.analyze(session)  # still completes gracefully
+    turn = asyncio.run(agent.analyze(session))  # still completes gracefully
     assert isinstance(turn, AgentTurn)
 
 
@@ -225,7 +226,7 @@ def test_injection_through_analyze_logs_warning(
     )
 
     with caplog.at_level(logging.WARNING, logger="cloudoptima.agent_base"):
-        agent.analyze(session)
+        asyncio.run(agent.analyze(session))
 
     assert any(
         "Injection pattern detected" in record.getMessage()
@@ -243,7 +244,7 @@ def test_delimiters_reach_the_llm() -> None:
     client = _CapturingClient()
     agent = _PassAgent(AgentType.ARCHITECT, client, Settings())
 
-    agent.analyze(_make_session())
+    asyncio.run(agent.analyze(_make_session()))
 
     prompt, _ = client.calls[0]
     assert "--- PROJECT NAME ---" in prompt
@@ -262,7 +263,7 @@ def test_benign_prompt_not_flagged_as_injection(
     agent = _PassAgent(AgentType.ARCHITECT, MockClient(), Settings())
 
     with caplog.at_level(logging.WARNING, logger="cloudoptima.agent_base"):
-        agent.analyze(_make_session())
+        asyncio.run(agent.analyze(_make_session()))
 
     assert not any(
         "Injection pattern detected" in record.getMessage()
@@ -309,7 +310,7 @@ def test_llm_receives_guarded_system_prompt() -> None:
     client = _CapturingClient()
     agent = _PassAgent(AgentType.ARCHITECT, client, Settings())
 
-    agent.analyze(_make_session())
+    asyncio.run(agent.analyze(_make_session()))
 
     assert len(client.calls) == 1
     _, system_prompt = client.calls[0]

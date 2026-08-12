@@ -135,6 +135,16 @@ class Settings(BaseSettings):
     rate_limit_global_per_hour: int = Field(
         default=60, description="Max requests globally per hour"
     )
+    # Round-3 review P2: the old limiter was an in-memory dict, so a 3-worker
+    # scale-out turned the "60/hour" quota into 180/hour. The backend is now
+    # pluggable — "memory" for a single process, "redis" for a shared store.
+    rate_limit_backend: str = Field(
+        default="memory",
+        description="Rate-limit store backend: memory or redis",
+    )
+    redis_url: str = Field(
+        default="", description="redis:// URL used when rate_limit_backend=redis"
+    )
 
     # ── Azure Settings ───────────────────────────────
     azure_subscription_id: str = Field(
@@ -210,6 +220,34 @@ class Settings(BaseSettings):
         description="Enforce the tool-action policy on every tool call",
     )
 
+    # ── Authentication (Phase 15 scaffold) ──────────────
+    # Production deployments must not serve the dashboard to anonymous
+    # users. When ``auth_enabled`` is true the dashboard requires a signed-in
+    # identity (Microsoft Entra ID via Streamlit's native OIDC login, or App
+    # Service Easy Auth in front of the app) before rendering anything.
+    # Default off so demo mode and the test suite behave exactly as before.
+    auth_enabled: bool = Field(
+        default=False,
+        description="Require login before the dashboard renders (Entra ID / OIDC)",
+    )
+    auth_provider: str = Field(
+        default="entra_id",
+        description="Identity provider: entra_id (Microsoft Entra ID via OIDC)",
+    )
+    auth_client_id: str = Field(
+        default="", description="OIDC application (client) ID"
+    )
+    auth_client_secret: SecretStr = Field(
+        default=SecretStr(""), description="OIDC client secret"
+    )
+    auth_tenant_id: str = Field(
+        default="", description="Entra ID tenant id (or 'common')"
+    )
+    auth_redirect_uri: str = Field(
+        default="",
+        description="OIDC redirect URI (the deployed dashboard URL)",
+    )
+
     # ── Tool-calling / MCP (issue #7, OPTIONAL) ────────
     # The tool registry (live pricing, compliance lookup) is always available
     # in-process; mcp_enabled additionally routes calls over the Model Context
@@ -237,6 +275,17 @@ class Settings(BaseSettings):
         if v <= 0:
             raise ValueError(f"llm_timeout must be strictly positive (> 0), got {v}")
         return v
+
+    @field_validator("rate_limit_backend")
+    @classmethod
+    def validate_rate_limit_backend(cls, v: str) -> str:
+        """Only memory and redis are valid rate-limit backends."""
+        allowed = {"memory", "redis"}
+        if v.lower() not in allowed:
+            raise ValueError(
+                f"rate_limit_backend must be one of {sorted(allowed)}, got '{v}'"
+            )
+        return v.lower()
 
     @field_validator("llm_provider")
     @classmethod
@@ -278,15 +327,24 @@ class Settings(BaseSettings):
             if self.anthropic_api_key.get_secret_value()
             else "",
             "google_api_key": "***REDACTED***" if self.google_api_key.get_secret_value() else "",
+            "auth_client_secret": "***REDACTED***"
+            if self.auth_client_secret.get_secret_value()
+            else "",
         }
 
     def __repr__(self) -> str:
-        """Custom repr that masks sensitive API keys."""
+        """Custom repr that masks sensitive API keys.
+
+        Every secret renders as the literal placeholder ``***REDACTED***`` —
+        not even the first three characters of a real key are shown. A leaked
+        prefix narrows the search space for an attacker reading logs or crash
+        reports (an external principal-engineer review finding), so masking is
+        all-or-nothing.
+        """
         fields: list[str] = []
         for name, value in self.__dict__.items():
             if isinstance(value, SecretStr):
-                secret = value.get_secret_value()
-                masked = f"{secret[:3]}***" if len(secret) > 3 else "***"
+                masked = "***REDACTED***" if value.get_secret_value() else ""
                 fields.append(f"{name}='{masked}'")
             else:
                 fields.append(f"{name}={value!r}")

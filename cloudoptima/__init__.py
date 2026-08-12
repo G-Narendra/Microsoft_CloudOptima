@@ -6,16 +6,18 @@ conflicts to produce a complete architecture with cost, security,
 and compliance reports.
 
 Typical usage:
+    >>> import asyncio
     >>> from cloudoptima.config import Settings
     >>> from cloudoptima.orchestrator import Orchestrator
     >>> settings = Settings()
     >>> orch = Orchestrator.from_settings(settings)
-    >>> session = orch.run(session)
+    >>> session = asyncio.run(orch.run(session))  # run() is async (round-3 P1)
 """
 
 from __future__ import annotations
 
 from cloudoptima.config import Settings
+from cloudoptima.context import AppContext
 from cloudoptima.llm_cache import LLMCache
 from cloudoptima.llm_client import (
     BaseLLMClient,
@@ -40,6 +42,7 @@ __version__ = "0.1.0"
 
 __all__ = [
     "Settings",
+    "AppContext",
     "BaseLLMClient",
     "MockClient",
     "create_llm_client",

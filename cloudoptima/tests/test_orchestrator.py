@@ -8,6 +8,7 @@ stdin→stdout CLI.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 from typing import Any
@@ -53,7 +54,7 @@ class _StubAgent(BaseAgent):
     def _validate_output(self, data: dict[str, Any]) -> tuple[bool, str]:  # pragma: no cover - stub
         return True, ""
 
-    def analyze(self, session: Session) -> AgentTurn:  # noqa: ARG002 - stub
+    async def analyze(self, session: Session) -> AgentTurn:  # noqa: ARG002 - stub
         return self._turn
 
 
@@ -118,7 +119,7 @@ def _orchestrator_with(
 
 def test_full_pipeline_completes_without_errors() -> None:
     """The whole pipeline runs and returns a completed session."""
-    session = _real_orchestrator().run(_make_session())
+    session = asyncio.run(_real_orchestrator().run(_make_session()))
 
     assert session.status == "completed"
     assert len(session.agent_turns) == 5  # 4 specialists + judge
@@ -129,7 +130,7 @@ def test_full_pipeline_completes_without_errors() -> None:
 
 def test_at_least_one_conflict_found_with_mock_data() -> None:
     """Mock data (compliance NEEDS_WORK + judge summaries) yields conflicts."""
-    session = _real_orchestrator().run(_make_session())
+    session = asyncio.run(_real_orchestrator().run(_make_session()))
 
     assert len(session.conflicts) >= 1
     dimensions = [c.dimension for c in session.conflicts]
@@ -138,7 +139,7 @@ def test_at_least_one_conflict_found_with_mock_data() -> None:
 
 def test_four_artifacts_generated() -> None:
     """Exactly the four expected artifacts are produced."""
-    session = _real_orchestrator().run(_make_session())
+    session = asyncio.run(_real_orchestrator().run(_make_session()))
 
     assert len(session.artifacts) == 4
     assert {a.type for a in session.artifacts} == {
@@ -153,7 +154,9 @@ def test_four_artifacts_generated() -> None:
 def test_broken_agent_does_not_crash_pipeline() -> None:
     """A failed specialist is recorded as an error turn; the run continues."""
     broken = _StubAgent(AgentType.ARCHITECT, _error_turn(AgentType.ARCHITECT))
-    session = _orchestrator_with({AgentType.ARCHITECT: broken}).run(_make_session())
+    session = asyncio.run(
+        _orchestrator_with({AgentType.ARCHITECT: broken}).run(_make_session())
+    )
 
     assert session.status == "completed"
     architect_turn = next(
@@ -170,11 +173,11 @@ def test_same_session_twice_has_same_conflict_count() -> None:
     orch = _real_orchestrator()
     session = _make_session()
 
-    first = orch.run(session)
+    first = asyncio.run(orch.run(session))
     first_count = len(first.conflicts)
     first_dimensions = [c.dimension for c in first.conflicts]
 
-    second = orch.run(session)  # same object — outputs are reset each run
+    second = asyncio.run(orch.run(session))  # same object — outputs are reset each run
     assert len(second.conflicts) == first_count
     assert [c.dimension for c in second.conflicts] == first_dimensions
     assert len(second.agent_turns) == len(first.agent_turns)
@@ -185,7 +188,7 @@ def test_same_session_twice_has_same_conflict_count() -> None:
 
 def test_budget_overrun_detected_as_architect_vs_cost() -> None:
     """An estimate above the budget fires the budget pair conflict."""
-    session = _real_orchestrator().run(_make_session(budget=1000.0))
+    session = asyncio.run(_real_orchestrator().run(_make_session(budget=1000.0)))
 
     dimensions = [c.dimension for c in session.conflicts]
     assert "architect_vs_cost" in dimensions
@@ -195,7 +198,7 @@ def test_budget_overrun_detected_as_architect_vs_cost() -> None:
 
 def test_no_budget_no_budget_conflict() -> None:
     """Without a budget the deterministic budget detector cannot fire."""
-    session = _real_orchestrator().run(_make_session(budget=None))
+    session = asyncio.run(_real_orchestrator().run(_make_session(budget=None)))
 
     dimensions = [c.dimension for c in session.conflicts]
     assert "architect_vs_cost" not in dimensions
@@ -205,7 +208,7 @@ def test_no_budget_no_budget_conflict() -> None:
 
 def test_judge_resolutions_applied_to_detected_conflicts() -> None:
     """Detected conflicts get resolutions folded in from the judge's summaries."""
-    session = _real_orchestrator().run(_make_session())
+    session = asyncio.run(_real_orchestrator().run(_make_session()))
 
     compliance_conflict = next(
         c for c in session.conflicts if c.dimension == "architect_vs_compliance"
@@ -215,7 +218,7 @@ def test_judge_resolutions_applied_to_detected_conflicts() -> None:
 
 def test_judge_reported_conflicts_are_adopted() -> None:
     """Conflicts the deterministic detector missed are adopted from the judge."""
-    session = _real_orchestrator().run(_make_session())
+    session = asyncio.run(_real_orchestrator().run(_make_session()))
 
     dimensions = [c.dimension for c in session.conflicts]
     # Mock judge reports cost_vs_security; the deterministic detector does not
@@ -229,7 +232,9 @@ def test_judge_reported_conflicts_are_adopted() -> None:
 def test_iac_artifact_scanned_for_malware() -> None:
     """Executable patterns in the design block the IaC artifact."""
     malicious = _StubAgent(AgentType.ARCHITECT, _malicious_architect_turn())
-    session = _orchestrator_with({AgentType.ARCHITECT: malicious}).run(_make_session())
+    session = asyncio.run(
+        _orchestrator_with({AgentType.ARCHITECT: malicious}).run(_make_session())
+    )
 
     iac = next(a for a in session.artifacts if a.type == "iac_bicep")
     assert "exec(" not in iac.content
@@ -239,7 +244,7 @@ def test_iac_artifact_scanned_for_malware() -> None:
 
 def test_iac_artifact_rendered_from_clean_design() -> None:
     """A clean design produces a real Bicep template with all four sections."""
-    session = _real_orchestrator().run(_make_session(project_name="E-Shop"))
+    session = asyncio.run(_real_orchestrator().run(_make_session(project_name="E-Shop")))
 
     iac = next(a for a in session.artifacts if a.type == "iac_bicep")
     assert "targetScope = 'resourceGroup'" in iac.content
@@ -255,12 +260,14 @@ def test_unexpected_agent_exception_marks_session_failed() -> None:
     """An exception escaping an agent marks the session failed, not a crash."""
 
     class _RaisingAgent(_StubAgent):
-        def analyze(self, session: Session) -> AgentTurn:  # noqa: ARG002
+        async def analyze(self, session: Session) -> AgentTurn:  # noqa: ARG002
             raise RuntimeError("boom")
 
-    session = _orchestrator_with(
-        {AgentType.JUDGE: _RaisingAgent(AgentType.JUDGE, _error_turn(AgentType.JUDGE))}
-    ).run(_make_session())
+    session = asyncio.run(
+        _orchestrator_with(
+            {AgentType.JUDGE: _RaisingAgent(AgentType.JUDGE, _error_turn(AgentType.JUDGE))}
+        ).run(_make_session())
+    )
 
     assert session.status == "failed"
 
@@ -295,7 +302,7 @@ def test_from_settings_builds_all_five_agents() -> None:
 def test_create_orchestrator_returns_ready_orchestrator() -> None:
     """app.create_orchestrator wires a runnable pipeline."""
     orch = app.create_orchestrator(Settings())
-    session = orch.run(_make_session())
+    session = asyncio.run(orch.run(_make_session()))
 
     assert session.status == "completed"
     assert len(session.artifacts) == 4

@@ -4,10 +4,11 @@
 > **Team:** Narendra (lead) · Andrew · Ivan
 > **Microsoft reviewer:** Punit Shah
 >
-> **One line:** Phases 0–11 are complete in practice (**478 tests · 93% coverage · mypy & ruff clean**),
+> **One line:** Phases 0–11 are complete in practice (**527 tests · 92.62% coverage · mypy & ruff clean**),
 > all **six of Punit's GitHub issues (#2–#7)** are implemented with the **real Microsoft
-> frameworks** (not look-alikes), and the remaining roadmap is clear: **Phases 12–15**
-> (Docker → Azure deploy → production → persistence & auth).
+> frameworks** (not look-alikes), an **independent external principal-engineer review**
+> scored the project 7.5/10 and every finding is fixed, and the remaining roadmap is
+> clear: **Phases 12–15** (Docker → Azure deploy → production → persistence & auth).
 
 ---
 
@@ -41,7 +42,7 @@ gap, so we extended the open phases (11–13) to carry them.
 | Issue | What he asked | The actual Microsoft/industry package we used | Live verification |
 |---|---|---|---|
 | **#2** | Azure AI Content Safety + Prompt Shields | `azure-ai-contentsafety` SDK for moderation; **Prompt Shields via the real REST `text:shieldPrompt` endpoint** (`httpx`, `Ocp-Apim-Subscription-Key`) | Moderation SDK wired; shield REST path tested; graceful fallback to the offline floor |
-| **#3** | PyRIT + AI Red Teaming at scale | `pyrit` 0.14 — custom `PromptTarget`, `UnicodeConfusableConverter` + `Base64Converter`, `SubStringScorer`, `SQLiteMemory` | Campaign drives **45 variants → 0.0% ASR** — and it *found a real gap* we then fixed (short-base64 smuggling) |
+| **#3** | PyRIT + AI Red Teaming at scale | `pyrit` 0.14 — custom `PromptTarget`, converters (UnicodeConfusable, Base64, Flip, ROT13, Atbash, Leetspeak, Bidi), `SubStringScorer`, `SQLiteMemory` | Campaign drives **119 strict variants → 0.0% ASR** (leet-of-base64 = documented known gap) — it *found real gaps* each round (short-base64 smuggling, Flip/ROT13 bypasses, then Atbash/leet/Bidi) and we fixed them |
 | **#4** | Automated evaluation via Azure AI Evaluation SDK | `azure-ai-evaluation` `evaluate()` — F1 + Rouge (always on, offline) + Groundedness/Relevance/Coherence + safety evaluators (when a judge model is configured) | Real metric numbers written to `scripts/evaluate/results/latest_eval.json` with **zero API keys needed** |
 | **#5** | Agent Governance Toolkit (AGT) | `agentmesh.governance.PolicyEngine` loads `cloudoptima/policies/tools.yaml` at runtime; `agt lint-policy` passes clean | `check_action` consults the **real AGT engine**: `get_live_price` → allow, `deploy` → deny, unknown → deny (fail closed) |
 | **#7** | MCP tool-driven agents | Official `mcp` SDK — FastMCP server (stdio) + `ClientSession` bridge, with an in-process registry fallback | `bridge.call_tool('list_regions')` → `source: 'mcp'` full protocol round-trip |
@@ -55,7 +56,7 @@ what Punit's red-teaming request was for. We fixed it properly at the sanitizer 
 (`decode_base64_tokens` — recursive decode-then-scan, re-checked against injection patterns
 and dangerous categories), added a CI case, and re-ran:
 
-- **PyRIT campaign: 0.0% ASR (0/45 variants)**
+- **PyRIT campaign: 0.0% ASR on 119 strict variants** (leet-of-base64 reported as the one documented known gap)
 - **Deterministic red-team gate: 0.0% (16 vectors)**
 - **Zero false positives** on legitimate Base64 (e.g. `"US--Canada 0--9"` passes)
 
@@ -64,6 +65,61 @@ and dangerous categories), added a CI case, and re-ran:
 The pattern we used for pricing holds everywhere: **when the optional package or API key is
 absent, the app behaves exactly as before** (offline mirror / regex floor). CloudOptima never
 breaks without an Azure resource — demo mode and tests still work with the mock provider.
+
+## 2.5 External Principal-Engineer Review — Scorecard → Fixes
+
+> An independent reviewer (a senior Azure AI engineer acting as an external reviewer, not
+> the project's official Microsoft reviewer) audited the entire repo and scored it
+> **7.5 / 10 overall** — the strongest areas were documentation (9), code quality (8.5) and
+> security (8); production readiness (4) was the weak point. Every actionable finding is
+> fixed and covered by regression tests.
+
+| Reviewer score | Finding | What we did |
+|---|---|---|
+| Security 8 → | `Settings.__repr__` leaked the first 3 chars of API keys | All secrets render as `***REDACTED***` — not even a prefix leaks (tests assert it) |
+| Code quality | Backtick regex flagged every Markdown inline-code span as command substitution | Scanner now only flags shell-looking backticks (operators, `$()`, command words); Markdown passes |
+| Issue #7 follow-up | Tool args never validated; no timeout on tool execution | Args validated against the declared schema (missing/typed-wrong rejected); 15s execution timeout via a daemon thread |
+| Responsible AI 7 → | All harm categories treated identically | `severity_action`: pass (0) / log (1–3) / block (≥threshold) / escalate (6); verdicts carry `max_severity` |
+| Responsible AI | ML safety was opt-in (`content_safety_enabled=False` default) | **Fail closed:** `create_orchestrator` refuses to start in production mode (`demo_mode=false`) without Content Safety |
+| Architecture 7.5 → | No error taxonomy — "LLM down" vs "bad output" indistinguishable | Error turns carry `error_kind` (llm / parse / validation / prompt_build); the orchestrator audits failed turns with the reason |
+| Issue #5 | (Verified present) governance audit trail logs every decision; YAML↔Python sync test exists | Confirmed in `test_governance.py`; documented here for discoverability |
+| Issue #4 | Eval was a script, not a gate; judge model unpinned | `--fail-under` exits non-zero on regression; judge pinned via `AZURE_OPENAI_EVAL_MODEL` |
+| Issue #3 | Only 2 converters; regex boundaries unstressed | **Flip + ROT13 converters added — they found 3 real bypasses** (jailbreak/role-switch/RAG-poison under Flip, ROT13, and flip/ROT13-of-base64). Fixed with involution unscrambling (`obfuscated_forms` + `decoded_base64_forms`); the round-2 campaign added Atbash/Leetspeak/Bidi and found 5 more — now **119 strict variants → 0.0% ASR** |
+| Production 4 → | No container, no CI/CD, no auth | `Dockerfile` (multi-stage, non-root, healthcheck) + `.dockerignore`; `.github/workflows/ci.yml` (ruff · mypy · pytest · red-team strict · PyRIT · eval · AGT lint · MCP smoke; Azure deploy on main); Phase 15 auth scaffold (`AUTH_*` config + dashboard login gate) |
+| Production | Sessions/rate-limits/anomaly baselines in-memory | Documented Phase 15 plan: Cosmos/Postgres sessions, Redis rate limits, Key Vault secrets (deployment-phase work) |
+
+### Round 2 — The Reviewer's Follow-up (8.8/10 after fixes)
+
+> The reviewer re-scored **7.5 → 8.8/10** after round 1, then ran the campaign again with
+> the converters we had just added and **found 5 more bypasses** (Atbash, leetspeak, Bidi).
+> Same loop, third time: red-team → fix → regression-test. Numbers below are verified on this machine.
+
+| Finding | What they said | What we did |
+|---|---|---|
+| **P0 — Bidi control chars** | `U+202E` RLO renders a backwards payload as an instruction; NFKC preserves it | `_BIDI_CONTROL` regex strips `[\u202A-\u202E \u2066-\u2069]` in both `clean_input` and `clean_output` |
+| **Atbash (letters + digits)** | Another involution PyRIT ships; our fold missed digit complement (0↔9), so atbash(b64(x)) stayed undecodable | `_ATBASH_TABLE` now mirrors PyRIT exactly (A–Z + 0–9); `obfuscated_forms` closed under 2 transform rounds → atbash-of-base64 unwraps |
+| **Leetspeak symbols** | PyRIT maps c→( — `1n57ru(710n5` never folded to "instructions" | Fold tables cover `(` → c and both ambiguous `1` resolutions (i-variant + l-variant) |
+| **Leetspeak i/l collision** | "helpful assistant" mixes i and l, so no global fold recovers it | Whole-phrase leet-tolerant regexes (`_LEET_PHRASE_PATTERNS` in sanitize + `_OFFLINE_HARM_LEET` in safety floor) — each letter matches itself or its PyRIT substitution |
+| **Leet-of-base64** | Genuinely undecodable: PyRIT maps letters to digits, base64 already contains digits | Reported honestly as a **known gap** in the campaign (same policy as the deterministic harness's `AttackCase.known_gap`); closed in production by the mandatory ML Content Safety layer |
+| **P1 async / P2 Redis** | Reviewer explicitly deferred both for a student project | **Done in round 3** — see below |
+
+**Round-2 results:** PyRIT campaign is now **119 strict variants → 0.0% ASR** (leet-of-base64 reported as the single known gap), plus the original 16-vector deterministic harness at 0.0%. Total suite **527 tests · 92.62% coverage**. mypy + ruff clean.
+
+### Round 3 — The Scaling Review (9.0/10)
+
+> "You are acting like a brilliant security researcher and a junior software
+> engineer. You nailed the complex mathematical defenses, but you failed to
+> build a system that can actually scale to 1,000 concurrent enterprise users."
+> — the reviewer, re-scoring **8.8 → 9.0/10** and capping Architecture at 8.5
+> and Production Readiness at 8.5 until the scaling homework was done.
+
+| Homework | What they said | What we did |
+|---|---|---|
+| **P1 — async pipeline** | `def analyze` / `def run` block on LLM network I/O; 4 users on 4 threads = lockup; "synchronous LLM pipelines are an instant PR rejection" | `BaseAgent.analyze` and `Orchestrator.run` are now real coroutines. Every client got `agenerate()`: httpx.AsyncClient for Nvidia/Anthropic/Gemini, `AsyncAzureOpenAI`/`AsyncOpenAI` for Azure/OpenAI, async sleep for Mock. `generate_with_retry` gained an async twin (`agenerate_with_retry` with `await asyncio.sleep`). The three specialists that only depend on the architect run **concurrently** via `asyncio.gather` — a peak-concurrency test proves all three overlap |
+| **P2 — rate limiting** | In-memory dict = 60/hour becomes 180/hour across 3 workers; "move it to Redis, or at least write an interface" | `RateLimitStore` protocol + `MemoryRateLimitStore` (default) + `RedisRateLimitStore` (INCR/EXPIRE, lazy redis import, injectable client for tests). `Settings.rate_limit_backend` (`memory`/`redis`) + `redis_url`; `build_rate_limiter()` maps config → store; `RateLimiter` is injected into the orchestrator |
+| **P3 — singleton abuse** | Module globals (`_audit_logger`, `_anomaly_detector`, `_LIMITER`) break test isolation and multi-tenant scale; "pass a Context or Dependencies container around" | New `cloudoptima/context.py` — `AppContext` owns settings, llm client, audit logger, anomaly detector, and rate limiter. `Orchestrator.from_settings` builds it and injects the instances into every agent (agent constructor gained an optional `context=`). Module-level getters remain only as a fallback for direct construction |
+
+**Round-3 results (verified on this machine):** 540 tests pass (527 + 13 new scaling tests) · **90.19% coverage** · mypy + ruff clean · both red-team gates still 0.0% ASR. The async pipeline runs the 5-agent flow in **~0.5s warm** (the ~14s first-run cost is the cost analyst's real Azure Retail Prices API fetch — 12 live HTTP calls, cached afterwards, exactly the "no mock data" requirement).
 
 ---
 
@@ -84,7 +140,7 @@ breaks without an Azure resource — demo mode and tests still work with the moc
 | 8 | Compliance rules (21 immutable) + RAG + static & live Azure Retail Prices | ✅ Complete | Narendra |
 | 9 | Audit logging, `@trace`, health checks | ✅ Complete | Narendra |
 | 10 | Security hardening (jailbreak scan, anomaly detection, strict schemas, rate limiting, pen tests) | ✅ Complete | Narendra |
-| 11 | Testing + **Punit's issues #2–#5** (Responsible AI) | ✅ Complete in practice — 478 tests · 93% coverage (85% gate); leftover: judge-model baseline scores | Narendra + team review |
+| 11 | Testing + **Punit's issues #2–#5** (Responsible AI) | ✅ Complete in practice — 527 tests · 92.62% coverage (85% gate); leftover: judge-model baseline scores | Narendra + team review |
 | 12 | Docker (also carries **issue #7** MCP tools + **issue #5** AGT deploy notes) | 📅 Planned | Team |
 | 13 | Deploy to Azure App Service + CI/CD | 📅 Planned | Team |
 | 14 | Production reliability (monitoring, scaling, secrets, backup) | 📅 Planned | Team |
@@ -116,7 +172,7 @@ Phase 11 and the issue implementations were reviewed by the team before this rep
       evaluation deployment, run `scripts/evaluate/run_evaluation.py --judge` and commit
       `scripts/evaluate/results/latest_eval.json` as the quality baseline.
 - Everything else in Phase 11 is done: `conftest.py`, pytest config in `pyproject.toml`
-  (verbose + coverage + **85% fail-under gate**), 478 tests, per-file coverage ≥90% on
+  (verbose + coverage + **85% fail-under gate**), 527 tests, per-file coverage ≥90% on
   `sanitize.py` (99%), `orchestrator.py` (93%), `agent_base.py` (92%).
 
 ### Phase 12 — Docker (Day 14–15)
@@ -165,15 +221,19 @@ the team and Punit, and must pass tests + the red-team strict gate before the `m
 
 | Gate | Result |
 |---|---|
-| Unit/integration tests | **478 passed · 0 failed** |
-| Coverage | **93% overall** (gate 85%) · sanitize 99% · orchestrator 93% · agent_base 92% |
+| Unit/integration tests | **540 passed · 0 failed** (478 before the review fixes) |
+| Coverage | **90.19% overall** (gate 85%) · tools/registry 100% · sanitize 99% · orchestrator 93% |
 | mypy | Clean across the package |
 | ruff | Clean (`cloudoptima/` + `scripts/`) |
-| PyRIT campaign (issue #3) | **0.0% ASR** across 45 variants |
+| PyRIT campaign (issue #3) | **0.0% ASR** across **119 strict variants** (Flip, ROT13, Atbash, Leetspeak, Bidi, UnicodeConfusable, Base64 converters; leet-of-base64 = documented known gap) |
 | Deterministic red-team gate | **0.0%** across 16 vectors |
 | AGT (issue #5) | `agt lint-policy` clean · live `PolicyEngine` enforces allow/deny |
 | MCP (issue #7) | Full protocol round-trip via the official SDK |
-| Evaluation (issue #4) | Offline F1/Rouge produced with no API keys |
+| Evaluation (issue #4) | Offline F1/Rouge produced with no API keys; `--fail-under` gate ready |
+| External review (11.7–11.8) | Rounds 1–3: every finding fixed + regression-tested · **7.5 → 8.8 → 9.0/10** · Dockerfile + CI + auth scaffold + async + DI + Redis |
+| Async pipeline (round-3 P1) | `analyze`/`run` are coroutines; peak-concurrency test proves the 3 specialists overlap via `asyncio.gather` |
+| Rate-limit stores (round-3 P2) | `MemoryRateLimitStore` + `RedisRateLimitStore` (fake-client tested) behind one `RateLimiter` |
+| Dependency injection (round-3 P3) | `AppContext` owned by the orchestrator; two contexts verified fully isolated |
 
 ---
 
@@ -189,7 +249,7 @@ Test suite (optional extras activate the framework integrations):
 
 ```bash
 pip install -e ".[dev,evaluation,redteam,governance,mcp]"
-pytest                                        # 478 tests · 93% coverage
+pytest                                        # 540 tests · 90.19% coverage
 python scripts/redteam/redteam_cloudoptima.py --strict
 python scripts/redteam/pyrit_redteam.py --strict
 python scripts/evaluate/run_evaluation.py

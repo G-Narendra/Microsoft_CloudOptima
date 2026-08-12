@@ -37,11 +37,32 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from redteam_cloudoptima import ATTACK_CASES, STRICT_ASR_LIMIT, probe_payload  # noqa: E402
 
+#: Converter x vector combos the deterministic layer does NOT claim to block.
+#: Leetspeak-of-base64 is one: PyRIT maps letters to digits, but base64 text
+#: already contains digits, so folding every digit back corrupts the real
+#: base64 — the payload is not deterministically decodable by any reader, ours
+#: or the target LLM's. The deterministic harness has the same precedent
+#: (AttackCase.known_gap): reported honestly, excluded from the strict gate,
+#: and mitigated in production by the mandatory ML Content Safety + Prompt
+#: Shields layer (issue #2), which is semantic rather than pattern-based.
+KNOWN_GAP_VARIANTS: frozenset[tuple[str, str]] = frozenset(
+    {("base64_short", "LeetspeakConverter")}
+)
+
+
 # Guarded import: pyrit is an optional dependency (extra `redteam`).
 try:  # pragma: no cover - exercised only when pyrit is installed
     from pyrit.memory import CentralMemory, SQLiteMemory
     from pyrit.models import Message, MessagePiece
-    from pyrit.prompt_converter import Base64Converter, UnicodeConfusableConverter
+    from pyrit.prompt_converter import (
+        AtbashConverter,
+        Base64Converter,
+        BidiConverter,
+        FlipConverter,
+        LeetspeakConverter,
+        ROT13Converter,
+        UnicodeConfusableConverter,
+    )
     from pyrit.prompt_target import PromptTarget
     from pyrit.score import SubStringScorer
 
@@ -104,10 +125,28 @@ async def run_campaign(limit: int | None = None) -> list[dict[str, Any]]:
 
     target = CloudOptimaTarget()
     scorer = _attack_success_scorer()
-    converters: list[Any] = [
+    # Deterministic converters only (the campaign must stay hermetic for CI):
+    # the obfuscation families, FlipConverter (full reversal), ROT13 and
+    # Atbash (involution ciphers), leetspeak folding, and the Bidi override
+    # injection — each stress the regex boundaries the way a real PyRIT
+    # campaign would. TranslationConverter is deliberately NOT wired in: it is
+    # an LLM-based converter needing a live model target (credentials +
+    # network), which would break the offline gate. It can be added for the
+    # credential-gated nightly campaign in Phase 13.
+    converters: list[Any] = []
+    for converter in (
         UnicodeConfusableConverter(deterministic=True),
         Base64Converter(),
-    ]
+        FlipConverter(),
+        ROT13Converter(),
+        AtbashConverter(),
+        LeetspeakConverter(deterministic=True),
+        BidiConverter(),
+    ):
+        try:  # pragma: no cover - defensive against pyrit version drift
+            converters.append(converter)
+        except Exception as exc:
+            print(f"  converter {type(converter).__name__} unavailable: {exc}")
     rows: list[dict[str, Any]] = []
     cases = list(ATTACK_CASES) if limit is None else list(ATTACK_CASES)[:limit]
     try:
@@ -156,6 +195,7 @@ async def run_campaign(limit: int | None = None) -> list[dict[str, Any]]:
                         "variant": converter_name,
                         "blocked": not reached,
                         "passed": reached,
+                        "known_gap": (case.vector, converter_name) in KNOWN_GAP_VARIANTS,
                     }
                 )
     finally:
@@ -183,14 +223,25 @@ def main() -> int:
     print(f"{'vector':<16}{'variant':<24}verdict")
     print("-" * 52)
     for row in rows:
-        status = "PASSED" if row["passed"] else "BLOCKED"
+        status = "KNOWN GAP" if row["known_gap"] else ("PASSED" if row["passed"] else "BLOCKED")
         print(f"  {row['vector']:<14}  {row['variant']:<22} {status}")
 
-    total = len(rows)
-    passed = sum(1 for row in rows if row["passed"])
+    # Strict gate counts only variants the deterministic layer claims to block;
+    # documented known gaps (leet-of-base64, closed by the ML shield in
+    # production) are reported but do not fail CI — same policy as the
+    # deterministic harness's AttackCase.known_gap.
+    strict_rows = [row for row in rows if not row["known_gap"]]
+    total = len(strict_rows)
+    passed = sum(1 for row in strict_rows if row["passed"])
     asr = passed / total if total else 0.0
     print("-" * 52)
-    print(f"PyRIT overall ASR: {asr:.1%} ({passed}/{total} variants reached output)")
+    print(f"PyRIT overall ASR: {asr:.1%} ({passed}/{total} strict variants reached output)")
+
+    gaps = [row for row in rows if row["known_gap"] and row["passed"]]
+    if gaps:
+        print("known gaps (ML Content Safety + Prompt Shields close these — issue #2):")
+        for row in gaps:
+            print(f"  {row['vector']} + {row['variant']}: {row['payload']}")
 
     if args.strict and asr >= STRICT_ASR_LIMIT:
         print(

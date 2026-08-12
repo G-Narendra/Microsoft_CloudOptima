@@ -1,0 +1,44 @@
+# Version control
+.git
+.gitignore
+.github/
+
+# Local Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+env/
+Pipfile.lock
+poetry.lock
+
+# Secrets — never enter the image
+.env
+.env.*
+!.env.example
+
+# Testing & quality caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+.coverage.*
+
+# Logs & runtime data
+logs/
+*.db
+results/
+
+# Local docs & personal files (never needed at runtime)
+docs/
+*.md
+narendra_doc.html
+review_cloudoptima.md
+
+# Container metadata (kept out of their own build context)
+Dockerfile
+.dockerignore
+docker-compose.yml

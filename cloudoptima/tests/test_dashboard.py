@@ -167,12 +167,18 @@ class TestHelpers:
 
 
 class TestDashboardApp:
+    # The full-flow reruns poll a real 5-agent pipeline on a background thread;
+    # under full-suite load those reruns can take tens of seconds, so the
+    # per-run AppTest timeout must be generous (the pipeline itself is what
+    # the test exercises, not a slow network call).
+    _RUN_TIMEOUT = 90
+
     def _run_analysis(
         self,
         project_name: str = "E-Shop",
         context: str = "Design a scalable web app for the UAE market",
     ) -> AppTest:
-        app = AppTest.from_file(str(_DASHBOARD_PATH), default_timeout=30)
+        app = AppTest.from_file(str(_DASHBOARD_PATH), default_timeout=self._RUN_TIMEOUT)
         app.run()
         assert not app.exception
 
@@ -216,7 +222,7 @@ class TestDashboardApp:
         assert "<script>" not in rendered
 
     def test_initial_page_shows_form(self) -> None:
-        app = AppTest.from_file(str(_DASHBOARD_PATH), default_timeout=30)
+        app = AppTest.from_file(str(_DASHBOARD_PATH), default_timeout=self._RUN_TIMEOUT)
         app.run()
         assert not app.exception
         # Sanity: initial page shows the input form and no results yet.

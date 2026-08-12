@@ -141,6 +141,66 @@ def test_tool_failure_returns_error_never_raises() -> None:
     assert "kaboom" in result["error"]
 
 
+# ── Argument validation & timeout (external review findings) ──────────────
+
+
+def test_tool_missing_required_parameter_rejected() -> None:
+    """A model that omits a required argument is rejected at the schema layer
+    instead of blowing up inside the tool function."""
+    result = build_default_registry().call("get_live_price", {})
+    assert result["ok"] is False
+    assert "missing required parameter 'service'" in result["error"]
+
+
+def test_tool_wrong_argument_type_rejected() -> None:
+    """{"service": 42} must be caught before it reaches the tool call."""
+    result = build_default_registry().call(
+        "get_live_price", {"service": 42, "region": "uaenorth"}
+    )
+    assert result["ok"] is False
+    assert "must be string" in result["error"]
+
+
+def test_tool_defaults_applied_before_execution(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Declared defaults are filled in when the caller omits them."""
+    import cloudoptima.compliance.rag
+
+    monkeypatch.setattr(
+        cloudoptima.compliance.rag, "query_rag",
+        lambda query, framework="", top_k=3: ["PDPL consent guidance"],
+    )
+    # top_k is not passed — the declared default of 3 must be applied.
+    result = build_default_registry().call(
+        "compliance_lookup", {"query": "consent", "framework": "pdpl"}
+    )
+    assert result["ok"] is True
+    assert result["result"]["passages"] == ["PDPL consent guidance"]
+
+
+def test_tool_timeout_returns_error_never_hangs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tool that never returns must fail fast, not block the pipeline."""
+    import time as _time
+
+    import cloudoptima.tools.registry as registry_module
+
+    monkeypatch.setattr(registry_module, "TOOL_TIMEOUT_SECONDS", 0.1)
+
+    registry = build_default_registry()
+
+    def _hang() -> str:
+        _time.sleep(10)
+        return "never"
+
+    registry.register(
+        "hang", "never returns", _hang, action_type="get_live_price"
+    )
+    result = registry.call("hang", {})
+    assert result["ok"] is False
+    assert "execution limit" in result["error"]
+
+
 def test_tools_disabled_setting_still_allows_reads(monkeypatch: pytest.MonkeyPatch) -> None:
     """tools_enabled=False keeps the registry callable — the flag governs
     exposure, not execution (feature toggles never break the pipeline)."""

@@ -13,6 +13,7 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from typing import Any, Final
@@ -22,7 +23,7 @@ from pydantic import ValidationError
 from cloudoptima.config import Settings
 from cloudoptima.models import Session
 from cloudoptima.orchestrator import Orchestrator
-from cloudoptima.safety import moderate_input_fields
+from cloudoptima.safety import enforce_production_safety, moderate_input_fields
 from cloudoptima.sanitize import DEFAULT_MAX_LENGTH, clean_input
 
 CLI_USAGE: Final[str] = (
@@ -35,14 +36,22 @@ def create_orchestrator(settings: Settings) -> Orchestrator:
     """Wire the full orchestrator from application settings.
 
     Builds the LLM client for the configured provider and instantiates all
-    five agents in pipeline order.
+    five agents in pipeline order. In production mode (``demo_mode=False``)
+    the Azure AI Content Safety layer is mandatory: the entry point fails
+    closed instead of serving unguarded traffic (external principal-engineer
+    review finding — real LLM runs require the ML safety layer).
 
     Args:
         settings: The application :class:`Settings`.
 
     Returns:
         A ready-to-run :class:`Orchestrator`.
+
+    Raises:
+        SafetyConfigurationError: When production mode is active but the ML
+            safety resource is missing or disabled.
     """
+    enforce_production_safety(settings)
     return Orchestrator.from_settings(settings)
 
 
@@ -90,7 +99,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        result = orchestrator.run(session)
+        # run() is async (round-3 P1); the CLI is a plain sync process, so we
+        # bridge with asyncio.run and get the full parallel pipeline.
+        result = asyncio.run(orchestrator.run(session))
     except Exception as exc:  # run() is designed not to raise; belt and suspenders
         print(f"error: pipeline failed: {exc}", file=sys.stderr)
         return 1

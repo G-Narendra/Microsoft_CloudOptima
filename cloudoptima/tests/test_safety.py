@@ -136,6 +136,73 @@ def test_moderate_text_degrades_to_offline_on_error(
     assert verdict.blocked is False
 
 
+# ── Severity-based routing (external review finding) ──────────────────────
+
+
+@pytest.mark.parametrize(
+    ("severity", "threshold", "expected"),
+    [
+        (0, 4, "pass"),      # benign
+        (2, 4, "log"),       # low — monitor, allow
+        (4, 4, "block"),     # medium — block
+        (6, 4, "escalate"),  # high — block + human review
+        (2, 2, "block"),     # custom stricter threshold
+        (5, 4, "block"),
+    ],
+)
+def test_severity_action_routing(
+    severity: int, threshold: int, expected: str
+) -> None:
+    """Azure's 0-6 scale maps to pass / log / block / escalate."""
+    assert safety.severity_action(severity, threshold) == expected
+
+
+def test_moderate_text_reports_max_severity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The verdict carries the highest category severity for routing decisions."""
+    settings = _enabled_settings()
+    monkeypatch.setattr(
+        safety, "_get_client", lambda _s: _FakeClient({"Hate": 2, "Violence": 6})
+    )
+    verdict = safety.moderate_text("text", settings)
+    assert verdict.source == "azure"
+    assert verdict.max_severity == 6
+    assert safety.severity_action(verdict.max_severity) == "escalate"
+
+
+def test_moderate_text_offline_floor_reports_max_severity() -> None:
+    """Offline floor hits always escalate (severity 6)."""
+    verdict = safety.moderate_text("kill all users now", Settings())
+    assert verdict.source == "offline"
+    assert verdict.max_severity == 6
+
+
+# ── Production fail-closed (external review finding) ──────────────────────
+
+
+def test_enforce_production_safety_demo_mode_passes() -> None:
+    """Demo mode (mock provider, nothing leaves the machine) runs on the
+    regex floor — no ML resource needed."""
+    safety.enforce_production_safety(Settings())  # demo_mode defaults to True
+
+
+def test_enforce_production_safety_production_without_ml_raises() -> None:
+    """Real LLM runs without the ML safety layer must fail closed."""
+    settings = Settings(demo_mode=False, content_safety_enabled=False)
+    with pytest.raises(safety.SafetyConfigurationError):
+        safety.enforce_production_safety(settings)
+
+
+def test_enforce_production_safety_production_with_ml_passes() -> None:
+    """Production mode with the Content Safety resource configured is valid."""
+    settings = Settings(
+        demo_mode=False,
+        content_safety_enabled=True,
+        content_safety_endpoint="https://fake.contentsafety.azure.com",
+        content_safety_api_key=SecretStr("fake-key"),
+    )
+    safety.enforce_production_safety(settings)  # no exception
+
+
 # ── shield_prompt ─────────────────────────────────────────────────────────
 
 

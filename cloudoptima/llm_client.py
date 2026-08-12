@@ -8,6 +8,7 @@ with exponential backoff.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -66,6 +67,25 @@ class BaseLLMClient(ABC):
         Returns:
             Raw string response from the LLM.
         """
+
+    async def agenerate(self, prompt: str, system_prompt: str = "") -> str:
+        """Async variant of :meth:`generate` (round-3 review, P1).
+
+        The default implementation runs the sync ``generate`` in a worker
+        thread via :func:`asyncio.to_thread`, so every existing client works
+        unchanged. Real HTTP clients override this with a genuine async call
+        (httpx.AsyncClient / AsyncOpenAI) so the pipeline never blocks the
+        event loop — an LLM call is 99% network wait, and blocking that wait
+        is what capped the old synchronous pipeline's throughput.
+
+        Args:
+            prompt: The user/agent prompt text.
+            system_prompt: Optional system-level instruction prompt.
+
+        Returns:
+            Raw string response from the LLM.
+        """
+        return await asyncio.to_thread(self.generate, prompt, system_prompt)
 
 
 # ── Mock Client ───────────────────────────────────────────────────────────────
@@ -266,6 +286,19 @@ class MockClient(BaseLLMClient):
         time.sleep(0.05)  # Simulate minimal latency
         return json.dumps(response)
 
+    async def agenerate(self, prompt: str, system_prompt: str = "") -> str:
+        """Async mock: same canned response, but sleep is non-blocking.
+
+        ``await asyncio.sleep`` yields the event loop instead of pinning a
+        thread, so the three parallel specialists really overlap instead of
+        queuing behind each other.
+        """
+        agent_key = _detect_agent_type(prompt, system_prompt)
+        response = MOCK_RESPONSES.get(agent_key, MOCK_RESPONSES["architect"])
+        self.last_tokens_used = max(1, len(json.dumps(response)) // 4)
+        await asyncio.sleep(0.05)  # Simulate minimal latency without blocking
+        return json.dumps(response)
+
 
 # ── Nvidia NIM Client ─────────────────────────────────────────────────────────
 
@@ -329,6 +362,46 @@ class NvidiaClient(BaseLLMClient):
             return ""
         return _strip_control_chars(content)
 
+    async def agenerate(self, prompt: str, system_prompt: str = "") -> str:
+        """Async chat completion against Nvidia NIM via httpx.AsyncClient.
+
+        Same request as :meth:`generate` — only the transport changes, so the
+        event loop can service other agents while this HTTP call is in flight.
+        """
+        messages: list[dict[str, str]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        payload = {
+            "model": self._model,
+            "messages": messages,
+            "temperature": self._temperature,
+            "max_tokens": 4096,
+        }
+
+        async with httpx.AsyncClient(
+            base_url=self.BASE_URL,
+            headers=headers,
+            timeout=float(self._timeout),
+        ) as client:
+            response = await client.post("/chat/completions", json=payload)
+            response.raise_for_status()
+            data = response.json()
+
+        usage = data.get("usage") or {}
+        self.last_tokens_used = int(usage.get("total_tokens", 0) or 0)
+        content: str = data["choices"][0]["message"]["content"]
+        if not content:
+            _logger.warning("NvidiaClient received empty response")
+            return ""
+        return _strip_control_chars(content)
+
 
 # ── Azure OpenAI Client ──────────────────────────────────────────────────────
 
@@ -356,6 +429,11 @@ class AzureClient(BaseLLMClient):
             api_version=settings.azure_openai_api_version,
             azure_endpoint=settings.azure_openai_endpoint,
         )
+        # Kept for the async path (agenerate) — avoids reaching into private
+        # SDK attributes like ``_client._api_version``.
+        self._api_key = api_key
+        self._api_version = settings.azure_openai_api_version
+        self._endpoint = settings.azure_openai_endpoint
         self._model = model or settings.llm_model
         self._temperature = settings.llm_temperature
         self._timeout = timeout if timeout is not None else settings.llm_timeout
@@ -372,6 +450,42 @@ class AzureClient(BaseLLMClient):
         messages.append({"role": "user", "content": prompt})
 
         response = self._client.chat.completions.create(
+            messages=cast(Any, messages),
+            model=self._model,
+            temperature=self._temperature,
+            response_format={"type": "json_object"},
+            timeout=float(self._timeout),
+        )
+
+        content = response.choices[0].message.content
+        usage = getattr(response, "usage", None)
+        self.last_tokens_used = int(getattr(usage, "total_tokens", 0) or 0)
+        if not content:
+            _logger.warning("AzureClient received empty response")
+            return ""
+        return _strip_control_chars(content)
+
+    async def agenerate(self, prompt: str, system_prompt: str = "") -> str:
+        """Async Azure OpenAI call using the SDK's AsyncAzureOpenAI client.
+
+        The async client is built lazily (the sync one in ``__init__`` stays
+        untouched, so constructing the client never requires a running loop).
+        """
+        messages: list[dict[str, str]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        else:
+            messages.append(
+                {"role": "system", "content": "Respond with valid JSON."}
+            )
+        messages.append({"role": "user", "content": prompt})
+
+        async_client = openai.AsyncAzureOpenAI(
+            api_key=self._api_key,
+            api_version=self._api_version,
+            azure_endpoint=self._endpoint,
+        )
+        response = await async_client.chat.completions.create(
             messages=cast(Any, messages),
             model=self._model,
             temperature=self._temperature,
@@ -421,6 +535,32 @@ class OpenAIClient(BaseLLMClient):
         messages.append({"role": "user", "content": prompt})
 
         response = self._client.chat.completions.create(
+            messages=cast(Any, messages),
+            model=self._model,
+            temperature=self._temperature,
+            response_format={"type": "json_object"},
+            timeout=float(self._timeout),
+        )
+
+        content = response.choices[0].message.content
+        usage = getattr(response, "usage", None)
+        self.last_tokens_used = int(getattr(usage, "total_tokens", 0) or 0)
+        if not content:
+            _logger.warning("OpenAIClient received empty response")
+            return ""
+        return _strip_control_chars(content)
+
+    async def agenerate(self, prompt: str, system_prompt: str = "") -> str:
+        """Async OpenAI (direct) call using the SDK's AsyncOpenAI client."""
+        messages: list[dict[str, str]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        else:
+            messages.append({"role": "system", "content": "Respond with valid JSON."})
+        messages.append({"role": "user", "content": prompt})
+
+        async_client = openai.AsyncOpenAI(api_key=self._client.api_key)
+        response = await async_client.chat.completions.create(
             messages=cast(Any, messages),
             model=self._model,
             temperature=self._temperature,
@@ -494,7 +634,45 @@ class AnthropicClient(BaseLLMClient):
         self.last_tokens_used = int(usage.get("input_tokens", 0) or 0) + int(
             usage.get("output_tokens", 0) or 0
         )
+        return self._extract_content(data)
 
+    async def agenerate(self, prompt: str, system_prompt: str = "") -> str:
+        """Async Anthropic Messages API call via httpx.AsyncClient."""
+        headers = {
+            "x-api-key": self._api_key,
+            "anthropic-version": self.API_VERSION,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        payload = {
+            "model": self._model,
+            "max_tokens": 4096,
+            "temperature": self._temperature,
+            "system": system_prompt or "Respond with valid JSON.",
+            "messages": [{"role": "user", "content": prompt}],
+        }
+
+        async with httpx.AsyncClient(
+            base_url=self.BASE_URL,
+            headers=headers,
+            timeout=float(self._timeout),
+        ) as client:
+            response = await client.post("/v1/messages", json=payload)
+            response.raise_for_status()
+            data = response.json()
+
+        usage = data.get("usage") or {}
+        self.last_tokens_used = int(usage.get("input_tokens", 0) or 0) + int(
+            usage.get("output_tokens", 0) or 0
+        )
+        return self._extract_content(data)
+
+    def _extract_content(self, data: dict[str, Any]) -> str:
+        """Pull the concatenated text out of an Anthropic response.
+
+        Shared by the sync and async paths so the parsing logic lives in one
+        place — a model change here only has to be fixed once.
+        """
         content_blocks = data.get("content") or []
         text_parts = [
             block.get("text", "")
@@ -506,6 +684,7 @@ class AnthropicClient(BaseLLMClient):
             _logger.warning("AnthropicClient received empty response")
             return ""
         return _strip_control_chars(content)
+
 
 
 # ── Google Gemini Client ──────────────────────────────────────────────────────
@@ -559,7 +738,39 @@ class GoogleClient(BaseLLMClient):
 
         usage = data.get("usageMetadata") or {}
         self.last_tokens_used = int(usage.get("totalTokenCount", 0) or 0)
+        return self._extract_text(data)
 
+    async def agenerate(self, prompt: str, system_prompt: str = "") -> str:
+        """Async Gemini generateContent call via httpx.AsyncClient."""
+        headers = {
+            "x-goog-api-key": self._api_key,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        payload: dict[str, Any] = {
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": self._temperature},
+        }
+        if system_prompt:
+            payload["systemInstruction"] = {"parts": [{"text": system_prompt}]}
+
+        async with httpx.AsyncClient(
+            base_url=self.BASE_URL,
+            headers=headers,
+            timeout=float(self._timeout),
+        ) as client:
+            response = await client.post(
+                f"/models/{self._model}:generateContent", json=payload
+            )
+            response.raise_for_status()
+            data = response.json()
+
+        usage = data.get("usageMetadata") or {}
+        self.last_tokens_used = int(usage.get("totalTokenCount", 0) or 0)
+        return self._extract_text(data)
+
+    def _extract_text(self, data: dict[str, Any]) -> str:
+        """Pull the text out of a Gemini response (shared sync/async helper)."""
         candidates = data.get("candidates") or []
         if not candidates or not isinstance(candidates[0], dict):
             _logger.warning("GoogleClient received empty response")
@@ -672,3 +883,65 @@ def generate_with_retry(
     if last_exception is not None:
         raise last_exception
     raise RuntimeError("generate_with_retry: unexpected state")  # pragma: no cover
+
+
+async def agenerate_with_retry(
+    client: BaseLLMClient,
+    prompt: str,
+    system_prompt: str = "",
+    max_retries: int = 3,
+    base_delay: float = 1.0,
+) -> str:
+    """Async counterpart of :func:`generate_with_retry` (round-3 review, P1).
+
+    Same exponential backoff, but the retry sleep is ``await asyncio.sleep``
+    so a retry never blocks the event loop (and thus never blocks the other
+    agents running in parallel via ``asyncio.gather``).
+
+    Args:
+        client: The LLM client to use (its ``agenerate`` is called).
+        prompt: The user/agent prompt.
+        system_prompt: Optional system prompt.
+        max_retries: Maximum number of attempts (default 3).
+        base_delay: Base delay in seconds for exponential backoff.
+
+    Returns:
+        The LLM response string.
+
+    Raises:
+        The last exception if all retries are exhausted.
+    """
+    last_exception: Exception | None = None
+
+    for attempt in range(max_retries):
+        try:
+            return await client.agenerate(prompt, system_prompt)
+        except (  # noqa: PERF203
+            httpx.HTTPStatusError,
+            httpx.TimeoutException,
+            openai.APIError,
+            TimeoutError,
+            ConnectionError,
+        ) as exc:
+            last_exception = exc
+            if attempt < max_retries - 1:
+                delay = base_delay * (2**attempt)
+                _logger.warning(
+                    "LLM request failed (attempt %d/%d): %s. "
+                    "Retrying in %.1fs...",
+                    attempt + 1,
+                    max_retries,
+                    str(exc),
+                    delay,
+                )
+                await asyncio.sleep(delay)
+            else:
+                _logger.error(
+                    "LLM request failed after %d attempts: %s",
+                    max_retries,
+                    str(exc),
+                )
+
+    if last_exception is not None:
+        raise last_exception
+    raise RuntimeError("agenerate_with_retry: unexpected state")  # pragma: no cover
