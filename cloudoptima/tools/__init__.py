@@ -1,11 +1,4 @@
-"""Tool layer (issue #7) — deterministic tools agents can call.
-
-Public surface:
-- :class:`ToolRegistry` / :class:`ToolSpec` — register, list, and execute
-  tools with governance + output sanitization.
-- :func:`get_registry` / :func:`build_default_registry` — the built-in tools
-  (live pricing, compliance lookup, region listing).
-"""
+"""Tool registry layer for deterministic agent tool execution."""
 
 from cloudoptima.tools.registry import (
     ToolRegistry,

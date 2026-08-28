@@ -1,14 +1,4 @@
-"""CloudOptima pricing — static catalog + live Azure Retail Prices lookups.
-
-Public API (see each submodule for details):
-
-- :data:`STATIC_PRICES` / :data:`KNOWN_AZURE_SERVICES` — the immutable,
-  read-only price catalog (Phase 10.2 AI-poisoning defense and Phase 8.3).
-- :func:`lookup` — price a single service from the static catalog.
-- :func:`estimate` — estimate a monthly cost from a config, offline.
-- :func:`get_price` / :func:`estimate_live` — live Azure Retail Prices API
-  lookups with a 1-hour cache and automatic static fallback (Phase 8.4).
-"""
+"""CloudOptima pricing module — static catalog and live Azure Retail Prices API integration."""
 
 from __future__ import annotations
 

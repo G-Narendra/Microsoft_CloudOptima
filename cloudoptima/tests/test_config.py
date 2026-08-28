@@ -39,12 +39,12 @@ def test_api_key_masked_in_repr() -> None:
     The reviewer finding was that even a 3-character prefix narrows the search
     space — the placeholder must be all-or-nothing (``***REDACTED***``).
     """
-    raw_key = "sk-nvidia-secret-key-12345"
-    settings = Settings(nvidia_api_key=SecretStr(raw_key))
+    raw_key = "sk-openai-secret-key-12345"
+    settings = Settings(openai_api_key=SecretStr(raw_key))
     repr_str = repr(settings)
 
     assert raw_key not in repr_str
-    assert "nvidia_api_key=" in repr_str
+    assert "openai_api_key=" in repr_str
     assert "***REDACTED***" in repr_str
     assert raw_key[:3] not in repr_str  # not even the first characters leak
 

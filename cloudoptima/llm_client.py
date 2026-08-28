@@ -14,7 +14,7 @@ import logging
 import re
 import time
 from abc import ABC, abstractmethod
-from typing import Any, cast
+from typing import Any, cast, Generator, AsyncGenerator
 
 import httpx
 import openai
@@ -24,7 +24,7 @@ from cloudoptima.config import Settings
 _logger = logging.getLogger(__name__)
 
 
-# ── Control Character Sanitization ────────────────────────────────────────────
+# Control Character Sanitization
 
 
 def _strip_control_chars(text: str) -> str:
@@ -41,7 +41,7 @@ def _strip_control_chars(text: str) -> str:
     return text
 
 
-# ── Abstract Base Class ───────────────────────────────────────────────────────
+# Abstract Base Class
 
 
 class BaseLLMClient(ABC):
@@ -57,7 +57,7 @@ class BaseLLMClient(ABC):
     last_tokens_used: int = 0
 
     @abstractmethod
-    def generate(self, prompt: str, system_prompt: str = "") -> str:
+    def generate(self, prompt: str, system_prompt: str = "") -> Generator[str, None, None]:
         """Send a prompt to the LLM and return the raw text response.
 
         Args:
@@ -65,10 +65,10 @@ class BaseLLMClient(ABC):
             system_prompt: Optional system-level instruction prompt.
 
         Returns:
-            Raw string response from the LLM.
+            Generator yielding raw string responses from the LLM.
         """
 
-    async def agenerate(self, prompt: str, system_prompt: str = "") -> str:
+    async def agenerate(self, prompt: str, system_prompt: str = "") -> AsyncGenerator[str, None]:
         """Async variant of :meth:`generate` (round-3 review, P1).
 
         The default implementation runs the sync ``generate`` in a worker
@@ -85,10 +85,11 @@ class BaseLLMClient(ABC):
         Returns:
             Raw string response from the LLM.
         """
-        return await asyncio.to_thread(self.generate, prompt, system_prompt)
+        for chunk in await asyncio.to_thread(list, self.generate(prompt, system_prompt)):
+            yield chunk
 
 
-# ── Mock Client ───────────────────────────────────────────────────────────────
+# Mock Client
 
 
 MOCK_RESPONSES: dict[str, dict[str, Any]] = {
@@ -277,16 +278,18 @@ class MockClient(BaseLLMClient):
     Used for development, testing, and demo mode. No API keys required.
     """
 
-    def generate(self, prompt: str, system_prompt: str = "") -> str:
+    def generate(self, prompt: str, system_prompt: str = "") -> Generator[str, None, None]:
         """Return a canned JSON response based on detected agent type."""
         agent_key = _detect_agent_type(prompt, system_prompt)
         response = MOCK_RESPONSES.get(agent_key, MOCK_RESPONSES["architect"])
+        text = json.dumps(response)
         # ~4 characters per token — mirrors llm_routing.estimate_tokens.
-        self.last_tokens_used = max(1, len(json.dumps(response)) // 4)
-        time.sleep(0.05)  # Simulate minimal latency
-        return json.dumps(response)
+        self.last_tokens_used = max(1, len(text) // 4)
+        for i in range(0, len(text), 10):
+            time.sleep(0.01)  # Simulate minimal latency
+            yield text[i:i+10]
 
-    async def agenerate(self, prompt: str, system_prompt: str = "") -> str:
+    async def agenerate(self, prompt: str, system_prompt: str = "") -> AsyncGenerator[str, None]:
         """Async mock: same canned response, but sleep is non-blocking.
 
         ``await asyncio.sleep`` yields the event loop instead of pinning a
@@ -295,12 +298,17 @@ class MockClient(BaseLLMClient):
         """
         agent_key = _detect_agent_type(prompt, system_prompt)
         response = MOCK_RESPONSES.get(agent_key, MOCK_RESPONSES["architect"])
-        self.last_tokens_used = max(1, len(json.dumps(response)) // 4)
-        await asyncio.sleep(0.05)  # Simulate minimal latency without blocking
-        return json.dumps(response)
+        text = json.dumps(response)
+        self.last_tokens_used = max(1, len(text) // 4)
+        for i in range(0, len(text), 10):
+            await asyncio.sleep(0.01)  # Simulate minimal latency without blocking
+            yield text[i:i+10]
 
 
-# ── Nvidia NIM Client ─────────────────────────────────────────────────────────
+
+
+
+# Nvidia NIM Client
 
 
 class NvidiaClient(BaseLLMClient):
@@ -315,8 +323,6 @@ class NvidiaClient(BaseLLMClient):
         self, settings: Settings, model: str | None = None, timeout: float | None = None
     ) -> None:
         self._api_key = settings.nvidia_api_key.get_secret_value()
-        # Provider-specific fallback: `create_client()` builds clients without
-        # a model, and llm_model (gpt-4o-mini) is NOT a Nvidia NIM model.
         self._model = model or settings.llm_nvidia_model
         self._temperature = settings.llm_temperature
         self._timeout = timeout if timeout is not None else settings.llm_timeout
@@ -327,7 +333,7 @@ class NvidiaClient(BaseLLMClient):
                 "Set NVIDIA_API_KEY in .env or use DEMO_MODE=true."
             )
 
-    def generate(self, prompt: str, system_prompt: str = "") -> str:
+    def generate(self, prompt: str, system_prompt: str = "") -> Generator[str, None, None]:
         """Send a chat completion request to Nvidia NIM API."""
         messages: list[dict[str, str]] = []
         if system_prompt:
@@ -361,15 +367,14 @@ class NvidiaClient(BaseLLMClient):
         content: str = data["choices"][0]["message"]["content"]
         if not content:
             _logger.warning("NvidiaClient received empty response")
-            return ""
-        return _strip_control_chars(content)
+            return
+        
+        content = _strip_control_chars(content)
+        for i in range(0, len(content), 10):
+            yield content[i:i+10]
 
-    async def agenerate(self, prompt: str, system_prompt: str = "") -> str:
-        """Async chat completion against Nvidia NIM via httpx.AsyncClient.
-
-        Same request as :meth:`generate` — only the transport changes, so the
-        event loop can service other agents while this HTTP call is in flight.
-        """
+    async def agenerate(self, prompt: str, system_prompt: str = "") -> AsyncGenerator[str, None]:
+        """Async chat completion against Nvidia NIM via httpx.AsyncClient."""
         messages: list[dict[str, str]] = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -401,11 +406,14 @@ class NvidiaClient(BaseLLMClient):
         content: str = data["choices"][0]["message"]["content"]
         if not content:
             _logger.warning("NvidiaClient received empty response")
-            return ""
-        return _strip_control_chars(content)
+            return
+            
+        content = _strip_control_chars(content)
+        for i in range(0, len(content), 10):
+            yield content[i:i+10]
 
 
-# ── Azure OpenAI Client ──────────────────────────────────────────────────────
+# Azure OpenAI Client
 
 
 class AzureClient(BaseLLMClient):
@@ -444,7 +452,7 @@ class AzureClient(BaseLLMClient):
         self._model = model or settings.llm_azure_model
         self._temperature = settings.llm_temperature
 
-    def generate(self, prompt: str, system_prompt: str = "") -> str:
+    def generate(self, prompt: str, system_prompt: str = "") -> Generator[str, None, None]:
         """Send a chat completion request to Azure OpenAI with JSON mode."""
         messages: list[dict[str, str]] = []
         if system_prompt:
@@ -461,17 +469,19 @@ class AzureClient(BaseLLMClient):
             temperature=self._temperature,
             response_format={"type": "json_object"},
             timeout=float(self._timeout),
+            stream=True,
         )
 
-        content = response.choices[0].message.content
-        usage = getattr(response, "usage", None)
-        self.last_tokens_used = int(getattr(usage, "total_tokens", 0) or 0)
-        if not content:
-            _logger.warning("AzureClient received empty response")
-            return ""
-        return _strip_control_chars(content)
+        total_content = ""
+        for chunk in response:
+            if chunk.choices and chunk.choices[0].delta.content:
+                text = _strip_control_chars(chunk.choices[0].delta.content)
+                total_content += text
+                yield text
 
-    async def agenerate(self, prompt: str, system_prompt: str = "") -> str:
+        self.last_tokens_used = max(1, len(total_content) // 4)
+
+    async def agenerate(self, prompt: str, system_prompt: str = "") -> AsyncGenerator[str, None]:
         """Async Azure OpenAI call using the SDK's AsyncAzureOpenAI client.
 
         The async client is built lazily (the sync one in ``__init__`` stays
@@ -497,18 +507,20 @@ class AzureClient(BaseLLMClient):
             temperature=self._temperature,
             response_format={"type": "json_object"},
             timeout=float(self._timeout),
+            stream=True,
         )
 
-        content = response.choices[0].message.content
-        usage = getattr(response, "usage", None)
-        self.last_tokens_used = int(getattr(usage, "total_tokens", 0) or 0)
-        if not content:
-            _logger.warning("AzureClient received empty response")
-            return ""
-        return _strip_control_chars(content)
+        total_content = ""
+        async for chunk in response:
+            if chunk.choices and chunk.choices[0].delta.content:
+                text = _strip_control_chars(chunk.choices[0].delta.content)
+                total_content += text
+                yield text
+
+        self.last_tokens_used = max(1, len(total_content) // 4)
 
 
-# ── OpenAI (direct) Client ────────────────────────────────────────────────────
+# OpenAI (direct) Client
 
 
 class OpenAIClient(BaseLLMClient):
@@ -534,7 +546,7 @@ class OpenAIClient(BaseLLMClient):
         self._model = model or settings.llm_openai_model
         self._temperature = settings.llm_temperature
 
-    def generate(self, prompt: str, system_prompt: str = "") -> str:
+    def generate(self, prompt: str, system_prompt: str = "") -> Generator[str, None, None]:
         """Send a chat completion request to OpenAI with JSON mode."""
         messages: list[dict[str, str]] = []
         if system_prompt:
@@ -549,17 +561,19 @@ class OpenAIClient(BaseLLMClient):
             temperature=self._temperature,
             response_format={"type": "json_object"},
             timeout=float(self._timeout),
+            stream=True,
         )
 
-        content = response.choices[0].message.content
-        usage = getattr(response, "usage", None)
-        self.last_tokens_used = int(getattr(usage, "total_tokens", 0) or 0)
-        if not content:
-            _logger.warning("OpenAIClient received empty response")
-            return ""
-        return _strip_control_chars(content)
+        total_content = ""
+        for chunk in response:
+            if chunk.choices and chunk.choices[0].delta.content:
+                text = _strip_control_chars(chunk.choices[0].delta.content)
+                total_content += text
+                yield text
+                
+        self.last_tokens_used = max(1, len(total_content) // 4)
 
-    async def agenerate(self, prompt: str, system_prompt: str = "") -> str:
+    async def agenerate(self, prompt: str, system_prompt: str = "") -> AsyncGenerator[str, None]:
         """Async OpenAI (direct) call using the SDK's AsyncOpenAI client."""
         messages: list[dict[str, str]] = []
         if system_prompt:
@@ -575,18 +589,20 @@ class OpenAIClient(BaseLLMClient):
             temperature=self._temperature,
             response_format={"type": "json_object"},
             timeout=float(self._timeout),
+            stream=True,
         )
 
-        content = response.choices[0].message.content
-        usage = getattr(response, "usage", None)
-        self.last_tokens_used = int(getattr(usage, "total_tokens", 0) or 0)
-        if not content:
-            _logger.warning("OpenAIClient received empty response")
-            return ""
-        return _strip_control_chars(content)
+        total_content = ""
+        async for chunk in response:
+            if chunk.choices and chunk.choices[0].delta.content:
+                text = _strip_control_chars(chunk.choices[0].delta.content)
+                total_content += text
+                yield text
+                
+        self.last_tokens_used = max(1, len(total_content) // 4)
 
 
-# ── Anthropic Claude Client ───────────────────────────────────────────────────
+# Anthropic Claude Client
 
 
 class AnthropicClient(BaseLLMClient):
@@ -614,7 +630,7 @@ class AnthropicClient(BaseLLMClient):
                 "Set ANTHROPIC_API_KEY in .env or use DEMO_MODE=true."
             )
 
-    def generate(self, prompt: str, system_prompt: str = "") -> str:
+    def generate(self, prompt: str, system_prompt: str = "") -> Generator[str, None, None]:
         """Send a messages request to the Anthropic API."""
         headers = {
             "x-api-key": self._api_key,
@@ -643,9 +659,11 @@ class AnthropicClient(BaseLLMClient):
         self.last_tokens_used = int(usage.get("input_tokens", 0) or 0) + int(
             usage.get("output_tokens", 0) or 0
         )
-        return self._extract_content(data)
+        content = self._extract_content(data)
+        for i in range(0, len(content), 10):
+            yield content[i:i+10]
 
-    async def agenerate(self, prompt: str, system_prompt: str = "") -> str:
+    async def agenerate(self, prompt: str, system_prompt: str = "") -> AsyncGenerator[str, None]:
         """Async Anthropic Messages API call via httpx.AsyncClient."""
         headers = {
             "x-api-key": self._api_key,
@@ -674,7 +692,9 @@ class AnthropicClient(BaseLLMClient):
         self.last_tokens_used = int(usage.get("input_tokens", 0) or 0) + int(
             usage.get("output_tokens", 0) or 0
         )
-        return self._extract_content(data)
+        content = self._extract_content(data)
+        for i in range(0, len(content), 10):
+            yield content[i:i+10]
 
     def _extract_content(self, data: dict[str, Any]) -> str:
         """Pull the concatenated text out of an Anthropic response.
@@ -696,7 +716,7 @@ class AnthropicClient(BaseLLMClient):
 
 
 
-# ── Google Gemini Client ──────────────────────────────────────────────────────
+# Google Gemini Client
 
 
 class GoogleClient(BaseLLMClient):
@@ -722,7 +742,7 @@ class GoogleClient(BaseLLMClient):
                 "Set GOOGLE_API_KEY in .env or use DEMO_MODE=true."
             )
 
-    def generate(self, prompt: str, system_prompt: str = "") -> str:
+    def generate(self, prompt: str, system_prompt: str = "") -> Generator[str, None, None]:
         """Send a generateContent request to the Gemini API."""
         headers = {
             "x-goog-api-key": self._api_key,
@@ -747,9 +767,11 @@ class GoogleClient(BaseLLMClient):
 
         usage = data.get("usageMetadata") or {}
         self.last_tokens_used = int(usage.get("totalTokenCount", 0) or 0)
-        return self._extract_text(data)
+        text = self._extract_text(data)
+        for i in range(0, len(text), 10):
+            yield text[i:i+10]
 
-    async def agenerate(self, prompt: str, system_prompt: str = "") -> str:
+    async def agenerate(self, prompt: str, system_prompt: str = "") -> AsyncGenerator[str, None]:
         """Async Gemini generateContent call via httpx.AsyncClient."""
         headers = {
             "x-goog-api-key": self._api_key,
@@ -776,7 +798,9 @@ class GoogleClient(BaseLLMClient):
 
         usage = data.get("usageMetadata") or {}
         self.last_tokens_used = int(usage.get("totalTokenCount", 0) or 0)
-        return self._extract_text(data)
+        text = self._extract_text(data)
+        for i in range(0, len(text), 10):
+            yield text[i:i+10]
 
     def _extract_text(self, data: dict[str, Any]) -> str:
         """Pull the text out of a Gemini response (shared sync/async helper)."""
@@ -798,7 +822,7 @@ class GoogleClient(BaseLLMClient):
         return _strip_control_chars(text)
 
 
-# ── Factory Function ─────────────────────────────────────────────────────────
+# Factory Function
 
 
 def create_llm_client(settings: Settings) -> BaseLLMClient:
@@ -816,8 +840,6 @@ def create_llm_client(settings: Settings) -> BaseLLMClient:
     provider = settings.llm_provider
     if provider == "mock":
         return MockClient()
-    elif provider == "nvidia":
-        return NvidiaClient(settings)
     elif provider == "azure":
         return AzureClient(settings)
     elif provider == "openai":
@@ -826,14 +848,16 @@ def create_llm_client(settings: Settings) -> BaseLLMClient:
         return AnthropicClient(settings)
     elif provider == "google":
         return GoogleClient(settings)
+    elif provider == "nvidia":
+        return NvidiaClient(settings)
     else:
         raise ValueError(
             f"Unknown LLM provider '{provider}'. "
-            "Expected one of: mock, nvidia, azure, openai, anthropic, google."
+            "Expected one of: mock, azure, openai, anthropic, google, nvidia."
         )
 
 
-# ── Retry Wrapper ─────────────────────────────────────────────────────────────
+# Retry Wrapper
 
 
 def generate_with_retry(
@@ -842,7 +866,7 @@ def generate_with_retry(
     system_prompt: str = "",
     max_retries: int = 3,
     base_delay: float = 1.0,
-) -> str:
+) -> Generator[str, None, None]:
     """Call client.generate() with exponential backoff retry logic.
 
     Args:
@@ -862,7 +886,9 @@ def generate_with_retry(
 
     for attempt in range(max_retries):
         try:
-            return client.generate(prompt, system_prompt)
+            for chunk in client.generate(prompt, system_prompt):
+                yield chunk
+            return
         except (  # noqa: PERF203
             httpx.HTTPStatusError,
             httpx.TimeoutException,
@@ -900,7 +926,7 @@ async def agenerate_with_retry(
     system_prompt: str = "",
     max_retries: int = 3,
     base_delay: float = 1.0,
-) -> str:
+) -> AsyncGenerator[str, None]:
     """Async counterpart of :func:`generate_with_retry` (round-3 review, P1).
 
     Same exponential backoff, but the retry sleep is ``await asyncio.sleep``
@@ -924,7 +950,9 @@ async def agenerate_with_retry(
 
     for attempt in range(max_retries):
         try:
-            return await client.agenerate(prompt, system_prompt)
+            async for chunk in client.agenerate(prompt, system_prompt):
+                yield chunk
+            return
         except (  # noqa: PERF203
             httpx.HTTPStatusError,
             httpx.TimeoutException,

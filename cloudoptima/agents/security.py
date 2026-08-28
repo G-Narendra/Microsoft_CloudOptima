@@ -1,16 +1,4 @@
-"""SecurityEngineerAgent — scans the proposed architecture for vulnerabilities.
-
-The security engineer reviews the architect's design and reports findings
-across identity, network, data, and key management, plus an overall risk
-rating and remediation recommendations.
-
-Validation is strict about two things:
-
-1. ``overall_risk_rating`` must be one of LOW/MEDIUM/HIGH/CRITICAL.
-2. Finding ``details`` must never smuggle executable code into the
-   architecture — every detail string is passed through
-   :func:`scan_for_malware_in_iac`.
-"""
+"""SecurityEngineerAgent — scans the proposed architecture for vulnerabilities."""
 
 from __future__ import annotations
 
@@ -20,10 +8,7 @@ from cloudoptima.agent_base import BaseAgent
 from cloudoptima.models import AgentType, Session
 from cloudoptima.sanitize import scan_for_malware_in_iac
 
-# The only risk ratings the model may report.
 _RISK_RATINGS: frozenset[str] = frozenset({"LOW", "MEDIUM", "HIGH", "CRITICAL"})
-
-# Phase 10.2: the security engineer's contract is exactly these keys.
 _ALLOWED_KEYS: Final[frozenset[str]] = frozenset(
     {"overall_risk_rating", "findings", "recommendations"}
 )
@@ -31,22 +16,36 @@ _ALLOWED_FINDING_KEYS: Final[frozenset[str]] = frozenset(
     {"control", "status", "details", "cvss_score"}
 )
 
-_SECURITY_SYSTEM_PROMPT = """\
-You are a cloud security engineer. Assess the proposed architecture for
-vulnerabilities and configuration gaps across identity, network, data, and key
-management. Rate the overall risk and list concrete remediations. Findings must
-describe controls — they must never include executable code or commands.
-
-Return ONLY valid JSON with exactly this structure — no prose outside the JSON:
-
-{
+_ROLE = "You are a cloud security engineer."
+_CAPABILITIES = (
+    "Assess the proposed architecture for vulnerabilities and configuration gaps across identity, network, data, and key management. "
+    "Rate the overall risk and list concrete remediations."
+)
+_CONSTRAINTS = (
+    "Findings must describe controls — they must never include executable code or commands. "
+    "Return ONLY valid JSON with exactly the required structure — no prose outside the JSON."
+)
+_OUTPUT_SCHEMA = """{
   "overall_risk_rating": "LOW" or "MEDIUM" or "HIGH" or "CRITICAL",
   "findings": [
     {"control": "string", "status": "PASS" or "WARNING" or "CONFIG_NEEDED",
      "details": "string", "cvss_score": 0.0 or null}
   ],
   "recommendations": ["string", "..."]
-}
+}"""
+
+_SECURITY_SYSTEM_PROMPT = f"""
+# ROLE
+{_ROLE}
+
+# CAPABILITIES
+{_CAPABILITIES}
+
+# CONSTRAINTS
+{_CONSTRAINTS}
+
+# OUTPUT SCHEMA
+{_OUTPUT_SCHEMA}
 """
 
 

@@ -54,33 +54,48 @@ from cloudoptima.llm_client import (
 
 _logger = logging.getLogger(__name__)
 
-# ── Model price table (USD per 1M tokens: input, output) ────────────────
-# Nvidia NIM free tier (build.nvidia.com) is $0 but rate-limited. The rest use
-# published 2026 list prices: Azure OpenAI and OpenAI pay-as-you-go, Anthropic
-# Claude, Google Gemini. Prices drive cheapest-first selection and spend
-# tracking, so they are deliberately conservative where unknown.
+# Model price table (USD per 1M tokens: input, output)
 MODEL_PRICES: Final[dict[str, tuple[float, float]]] = {
     "mock": (0.0, 0.0),
+    # Nvidia NIM free tier (build.nvidia.com) — $0 but rate-limited
     "meta/llama-3.3-70b-instruct": (0.0, 0.0),
     "meta/llama-3.1-8b-instruct": (0.0, 0.0),
+    "meta/llama-3.1-70b-instruct": (0.0, 0.0),
     "nvidia/llama-3.1-nemotron-70b-instruct": (0.0, 0.0),
     "deepseek-ai/deepseek-r1": (0.0, 0.0),
+    # Azure OpenAI deployments — priced per Azure OpenAI Pay-As-You-Go 2026
+    # Deployment names used by the user's Azure resource (custom names map here)
+    "cloud-architect-llm": (0.15, 0.60),  # gpt-4o-mini pricing
     "gpt-4o-mini": (0.15, 0.60),
     "gpt-4o": (2.50, 10.00),
     "gpt-4.1": (2.00, 8.00),
     "gpt-4.1-mini": (0.40, 1.60),
+    # Anthropic Claude
     "claude-sonnet-4-20250514": (3.00, 15.00),
     "claude-3-5-sonnet-20241022": (3.00, 15.00),
     "claude-3-5-haiku-20241022": (0.80, 4.00),
     "claude-3-7-sonnet-20250219": (3.00, 15.00),
+    # Google Gemini
     "gemini-2.0-flash": (0.10, 0.40),
     "gemini-2.5-flash": (0.30, 2.50),
     "gemini-2.5-pro": (1.25, 10.00),
 }
 
-# Unknown models get a conservative price so they never rank ahead of known
-# cheap ones.
+# Unknown models get a conservative price so they don't accidentally rank first.
 _UNKNOWN_PRICE: Final[tuple[float, float]] = (1.0, 1.0)
+
+# Provider priority for routing order (lower = tried first).
+# Azure is tried first for privacy, data residency, and existing contractual commitment.
+# Nvidia NIM is the free-tier overflow valve for high traffic.
+# Mock is always last (safety net only).
+_PROVIDER_PRIORITY: Final[dict[str, int]] = {
+    "azure": 0,
+    "nvidia": 1,
+    "openai": 2,
+    "google": 3,
+    "anthropic": 4,
+    "mock": 99,
+}
 
 # Agents that run the "smart" (strongest) tier: the architect designs, the
 # judge arbitrates. The remaining specialists run the cheaper tier.
@@ -148,15 +163,10 @@ class CostAwareRouter(BaseLLMClient):
         # no lock. If generate() is ever called concurrently, guard it.
         self._lock = threading.Lock()
 
-    # ── BaseLLMClient ──────────────────────────────────────────────────
+    # BaseLLMClient implementation
 
-    def generate(self, prompt: str, system_prompt: str = "") -> str:
-        """Route one call: cheapest healthy provider first, failover on error.
-
-        Raises:
-            The last provider exception when every candidate fails, or
-            ``RuntimeError`` when no provider is available for the tier.
-        """
+    def generate(self, prompt: str, system_prompt: str = "") -> Generator[str, None, None]:
+        """Route one call: cheapest healthy provider first, failover on error."""
         tier = self._tier_for(system_prompt)
         candidates = self._ordered_candidates(tier)
         if not candidates:
@@ -169,13 +179,16 @@ class CostAwareRouter(BaseLLMClient):
                 continue
             client = self._clients[key]
             try:
-                response = client.generate(prompt, system_prompt)
-                # Surface the winning provider's usage so agents can record
-                # per-turn token counts (Phase 10.2).
+                response = ""
+                for chunk in client.generate(prompt, system_prompt):
+                    response += chunk
+                    yield chunk
+                if not response.strip():
+                    raise ValueError(f"Provider {provider} returned an empty response")
                 self.last_tokens_used = client.last_tokens_used
                 self._record_success(provider, key, prompt, response)
-                return response
-            except Exception as exc:  # failover to the next provider
+                return
+            except Exception as exc:
                 self._record_failure(provider, exc)
                 last_exception = exc
 
@@ -184,21 +197,10 @@ class CostAwareRouter(BaseLLMClient):
         raise RuntimeError(
             f"no LLM provider could handle the request for tier {tier!r} "
             "(all candidates were skipped by the spend cap)"
-        )  # pragma: no cover
+        )
 
-    async def agenerate(self, prompt: str, system_prompt: str = "") -> str:
-        """Async routing — same cheapest-healthy-first order, awaited calls.
-
-        Round-3 review P1: the old ``generate`` blocked on every provider's
-        HTTP call. This awaits each candidate's ``agenerate`` instead, so the
-        router participates in the parallel specialist run instead of pinning
-        the event loop. Failover, spend-cap skipping, and health tracking are
-        identical to the sync path.
-
-        Raises:
-            The last provider exception when every candidate fails, or
-            ``RuntimeError`` when no provider is available for the tier.
-        """
+    async def agenerate(self, prompt: str, system_prompt: str = "") -> AsyncGenerator[str, None]:
+        """Async routing with same provider ordering and failover."""
         tier = self._tier_for(system_prompt)
         candidates = self._ordered_candidates(tier)
         if not candidates:
@@ -211,13 +213,16 @@ class CostAwareRouter(BaseLLMClient):
                 continue
             client = self._clients[key]
             try:
-                response = await client.agenerate(prompt, system_prompt)
-                # Surface the winning provider's usage so agents can record
-                # per-turn token counts (Phase 10.2).
+                response = ""
+                async for chunk in client.agenerate(prompt, system_prompt):
+                    response += chunk
+                    yield chunk
+                if not response.strip():
+                    raise ValueError(f"Provider {provider} returned an empty response")
                 self.last_tokens_used = client.last_tokens_used
                 self._record_success(provider, key, prompt, response)
-                return response
-            except Exception as exc:  # failover to the next provider
+                return
+            except Exception as exc:
                 self._record_failure(provider, exc)
                 last_exception = exc
 
@@ -226,9 +231,9 @@ class CostAwareRouter(BaseLLMClient):
         raise RuntimeError(
             f"no LLM provider could handle the request for tier {tier!r} "
             "(all candidates were skipped by the spend cap)"
-        )  # pragma: no cover
+        )
 
-    # ── Routing internals ──────────────────────────────────────────────
+    # Routing internals
 
     def _tier_for(self, system_prompt: str) -> str:
         """Pick the quality tier from the agent's system prompt role."""
@@ -236,24 +241,24 @@ class CostAwareRouter(BaseLLMClient):
         return TIER_SMART if agent in _SMART_AGENTS else TIER_FAST
 
     def _ordered_candidates(self, tier: str) -> list[tuple[str, tuple[str, str]]]:
-        """Candidates for ``tier`` ordered by (health, role, price)."""
+        """Candidates for tier ordered by health, priority, and price."""
         keys = [k for k in self._clients if k[1] == tier]
 
-        def sort_key(key: tuple[str, str]) -> tuple[int, int, float]:
+        def sort_key(key: tuple[str, str]) -> tuple[int, int, int, float]:
             provider = key[0]
             unhealthy = (
                 1
                 if self._stats[provider].consecutive_failures >= self._DEMOTE_AFTER_FAILURES
                 else 0
             )
-            rank = self._MOCK_RANK if provider == "mock" else 0
+            priority = _PROVIDER_PRIORITY.get(provider, 50)
             price_in, _ = model_pricing(self._models.get(key, ""))
-            return (unhealthy, rank, price_in)
+            return (unhealthy, priority, price_in)
 
         return [(k[0], k) for k in sorted(keys, key=sort_key)]
 
     def _within_spend_cap(self, provider: str, key: tuple[str, str], prompt: str) -> bool:
-        """True when the estimated input cost fits the configured spend cap."""
+        """Check if estimated cost is within the configured limit."""
         cap = self._settings.routing_max_cost_per_request
         price_in, _ = model_pricing(self._models.get(key, ""))
         estimated = (estimate_tokens(prompt) / 1_000_000) * price_in
@@ -262,7 +267,7 @@ class CostAwareRouter(BaseLLMClient):
     def _record_success(
         self, provider: str, key: tuple[str, str], prompt: str, response: str
     ) -> None:
-        """Track a successful call and its estimated spend."""
+        """Track successful provider response and estimate spend."""
         model = self._models.get(key, "")
         with self._lock:
             stats = self._stats[provider]
@@ -273,7 +278,7 @@ class CostAwareRouter(BaseLLMClient):
             )
 
     def _record_failure(self, provider: str, exc: Exception) -> None:
-        """Track a failed call and log the provider's health."""
+        """Track failed provider call."""
         with self._lock:
             stats = self._stats[provider]
             stats.failures += 1
@@ -285,7 +290,7 @@ class CostAwareRouter(BaseLLMClient):
             exc,
         )
 
-    # ── Introspection ──────────────────────────────────────────────────
+    # Introspection
 
     def stats(self) -> dict[str, dict[str, int | float]]:
         """Per-provider routing statistics (calls, failures, spend)."""
@@ -320,6 +325,7 @@ def create_routed_client(settings: Settings) -> CostAwareRouter:
         if provider == "mock":
             add("mock", TIER_SMART, MockClient(), "mock")
             add("mock", TIER_FAST, MockClient(), "mock")
+
         elif provider == "nvidia":
             try:
                 add(
@@ -442,6 +448,9 @@ def create_routed_client(settings: Settings) -> CostAwareRouter:
                 _logger.info("Routing: Google Gemini unavailable — %s", exc)
         else:  # pragma: no cover - guarded by Settings validation
             _logger.warning("Routing: unknown provider %r ignored", provider)
+
+
+
 
     # Safety net: no real credentials -> fall back to mock so the app never
     # crashes on missing keys.

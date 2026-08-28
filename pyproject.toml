@@ -21,33 +21,31 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+azure = [
+    "azure-identity>=1.15.0,<2.0",
+    "azure-keyvault-secrets>=4.8.0,<5.0",
+    "azure-search-documents>=11.4.0b8,<12.0",
+    "azure-monitor-opentelemetry>=1.4.0,<2.0",
+]
 rag = [
     "chromadb>=0.5,<1.0",
 ]
-# Issue #2 — Azure AI Content Safety + Prompt Shields (ML moderation layer).
 safety = [
     "azure-ai-contentsafety>=1.0,<2.0",
 ]
-# Issue #7 — Model Context Protocol (MCP client + FastMCP server).
 mcp = [
     "mcp[cli]>=2.0,<3.0",
 ]
-# Issue #4 — Azure AI Evaluation SDK (quality evaluation harness).
 evaluation = [
     "azure-ai-evaluation>=1.0,<2.0",
 ]
-# Issue #3 — PyRIT automated red teaming.
 redteam = [
     "pyrit>=0.7,<1.0",
 ]
-# Issue #5 — Microsoft Agent Governance Toolkit (runtime policy enforcement).
-# `-core` ships the agentmesh.governance PolicyEngine we load policies into.
 governance = [
     "agent-governance-toolkit>=4.1,<5.0",
     "agent-governance-toolkit-core>=4.1,<5.0",
 ]
-# Round-3 review P2 — shared Redis-backed rate limiting for scaled-out
-# deployments (the in-memory limiter can't enforce one quota across workers).
 redis = [
     "redis>=5.0,<7.0",
 ]
@@ -81,7 +79,7 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["cloudoptima/tests"]
-addopts = "-v --cov=cloudoptima --cov-report=term-missing --cov-fail-under=85"
+addopts = "-v --cov=cloudoptima --cov-report=term-missing --cov-fail-under=90"
 
 [tool.coverage.run]
 source = ["cloudoptima"]
@@ -92,4 +90,4 @@ include = ["cloudoptima*"]
 
 [tool.coverage.report]
 show_missing = true
-fail_under = 85
+fail_under = 90

@@ -1,15 +1,4 @@
-"""Entry points: orchestrator wiring + a stdin-to-stdout CLI (Phase 6).
-
-:func:`create_orchestrator` builds the full pipeline from settings (the
-streamlit dashboard imports it). :func:`main` is a tiny CLI: it reads a
-Session JSON object from stdin, runs the pipeline, and prints the updated
-session as JSON. Secrets never leave the process — the session model only
-carries user inputs and pipeline output.
-
-Usage:
-    $ echo '{"project_name": "E-Shop", "user_prompt": "Design a scalable web app"}' \\
-        | python -m cloudoptima.app
-"""
+"""Entry points: orchestrator wiring + a stdin-to-stdout CLI (Phase 6)."""
 
 from __future__ import annotations
 

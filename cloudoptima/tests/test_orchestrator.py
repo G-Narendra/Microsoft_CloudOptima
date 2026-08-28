@@ -24,6 +24,7 @@ from cloudoptima.agents.cost_analyst import CostAnalystAgent
 from cloudoptima.agents.judge import JudgeAgent
 from cloudoptima.agents.security import SecurityEngineerAgent
 from cloudoptima.config import Settings
+from cloudoptima.context import AppContext
 from cloudoptima.llm_client import MockClient
 from cloudoptima.models import AgentTurn, AgentType, Session
 from cloudoptima.orchestrator import Orchestrator
@@ -36,8 +37,7 @@ def _reset_global_rate_limits() -> None:
     reset_rate_limits()
 
 
-# ── Test doubles ───────────────────────────────────────────────────────
-
+# Test doubles
 
 class _StubAgent(BaseAgent):
     """Returns a fixed AgentTurn without calling any LLM."""
@@ -79,13 +79,14 @@ def _malicious_architect_turn() -> AgentTurn:
     )
 
 
-# ── Fixtures / helpers ─────────────────────────────────────────────────
+# Fixtures / helpers
 
 
 def _make_session(**overrides: Any) -> Session:
     defaults: dict[str, Any] = {
         "project_name": "Demo Project",
         "user_prompt": "Build a scalable web app on Azure",
+        "hitl_approved": True,
     }
     defaults.update(overrides)
     return Session(**defaults)
@@ -102,19 +103,20 @@ def _orchestrator_with(
     """Orchestrator with real agents except any listed in ``overrides``."""
     settings = Settings()
     llm = MockClient()
+    context = AppContext.from_settings(settings)
     agents: dict[AgentType, BaseAgent] = {
-        AgentType.ARCHITECT: ArchitectAgent(AgentType.ARCHITECT, llm, settings),
-        AgentType.COST_ANALYST: CostAnalystAgent(AgentType.COST_ANALYST, llm, settings),
-        AgentType.SECURITY: SecurityEngineerAgent(AgentType.SECURITY, llm, settings),
-        AgentType.COMPLIANCE: ComplianceOfficerAgent(AgentType.COMPLIANCE, llm, settings),
-        AgentType.JUDGE: JudgeAgent(AgentType.JUDGE, llm, settings),
+        AgentType.ARCHITECT: ArchitectAgent(AgentType.ARCHITECT, llm, settings, context=context),
+        AgentType.COST_ANALYST: CostAnalystAgent(AgentType.COST_ANALYST, llm, settings, context=context),
+        AgentType.SECURITY: SecurityEngineerAgent(AgentType.SECURITY, llm, settings, context=context),
+        AgentType.COMPLIANCE: ComplianceOfficerAgent(AgentType.COMPLIANCE, llm, settings, context=context),
+        AgentType.JUDGE: JudgeAgent(AgentType.JUDGE, llm, settings, context=context),
     }
     if overrides:
         agents.update(overrides)
-    return Orchestrator(agents=agents, config=settings)
+    return Orchestrator(agents=agents, config=settings, context=context)
 
 
-# ── Checklist 6.3 — core scenarios ─────────────────────────────────────
+# Core scenarios
 
 
 def test_full_pipeline_completes_without_errors() -> None:
@@ -183,7 +185,7 @@ def test_same_session_twice_has_same_conflict_count() -> None:
     assert len(second.agent_turns) == len(first.agent_turns)
 
 
-# ── Conflict detection specifics ───────────────────────────────────────
+# Conflict detection specifics
 
 
 def test_budget_overrun_detected_as_architect_vs_cost() -> None:
@@ -226,7 +228,7 @@ def test_judge_reported_conflicts_are_adopted() -> None:
     assert "cost_vs_security" in dimensions
 
 
-# ── Artifact safety ────────────────────────────────────────────────────
+# Artifact safety
 
 
 def test_iac_artifact_scanned_for_malware() -> None:
@@ -253,7 +255,7 @@ def test_iac_artifact_rendered_from_clean_design() -> None:
     assert "Microsoft.ContainerService" in iac.content
 
 
-# ── Resilience ─────────────────────────────────────────────────────────
+# Resilience
 
 
 def test_unexpected_agent_exception_marks_session_failed() -> None:
@@ -285,7 +287,7 @@ def test_missing_agent_role_rejected() -> None:
         raise AssertionError("expected ValueError for missing agents")
 
 
-# ── Factory + app entry point ──────────────────────────────────────────
+# Factory + app entry point
 
 
 def test_from_settings_builds_all_five_agents() -> None:
@@ -313,7 +315,11 @@ def test_cli_main_runs_pipeline_from_stdin(
 ) -> None:
     """A valid session JSON on stdin produces the completed session on stdout."""
     payload = json.dumps(
-        {"project_name": "CLI App", "user_prompt": "Design a batch pipeline"}
+        {
+            "project_name": "CLI App",
+            "user_prompt": "Design a batch pipeline",
+            "hitl_approved": True,
+        }
     )
     monkeypatch.setattr("sys.stdin", io.StringIO(payload))
 

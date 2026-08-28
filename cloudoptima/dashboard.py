@@ -1,28 +1,11 @@
-"""Streamlit dashboard (Phase 7).
-
-The user fills in a form, the orchestrator runs the five-agent pipeline, and
-the results land across four tabs (Overview, Agents, Conflicts, Artifacts)
-with downloadable artifacts.
-
-Design notes:
-- **Progress is real, never faked.** The orchestrator runs on a background
-  thread; the main thread polls ``session.agent_turns`` and only moves the
-  bar when a turn actually completes.
-- **Security first.** Every user value passes through :func:`clean_input` in
-  :func:`build_session`; every LLM-produced string through
-  :func:`clean_output` before display. ``unsafe_allow_html`` is never used.
-- **Testable core.** Pure logic (session building, severity mapping, text
-  formatting) lives in module-level functions that never touch Streamlit, so
-  they're unit-testable without a Streamlit runtime.
-
-Run with:
-    streamlit run cloudoptima/dashboard.py
-"""
+"""Streamlit dashboard (Phase 7)."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
+import queue
 import threading
 import time
 from typing import Any, Final
@@ -33,6 +16,7 @@ import streamlit as st
 from cloudoptima import __version__
 from cloudoptima.agents import DISPLAY_NAMES
 from cloudoptima.app import create_orchestrator
+from cloudoptima.auth import authenticate, can_approve, can_deploy
 from cloudoptima.config import Settings
 from cloudoptima.health import check_all, overall_status
 from cloudoptima.models import (
@@ -50,7 +34,7 @@ from cloudoptima.pricing import extract_services, live_prices
 from cloudoptima.safety import moderate_input_fields
 from cloudoptima.sanitize import clean_input, clean_output
 
-# ── Constants ───────────────────────────────────────────────────────────
+# Constants
 
 _START_TIME: Final[float] = time.time()
 _PAGE_TITLE: Final[str] = "Microsoft CloudOptima"
@@ -81,7 +65,7 @@ _PRICING_SOURCE_LABELS: Final[dict[str, str]] = {
 }
 
 
-# ── Pure helpers (unit-testable, no Streamlit calls) ────────────────────
+# Pure helpers (unit-testable, no Streamlit calls)
 
 
 def _parse_enum(enum_cls: type[Any], value: object, default: Any) -> Any:
@@ -220,6 +204,7 @@ def session_status_badge(session: Session) -> str:
     return {
         "pending": ":blue[PENDING]",
         "running": ":orange[RUNNING]",
+        "pending_approval": ":orange[PENDING APPROVAL]",
         "completed": ":green[COMPLETED]",
         "failed": ":red[FAILED]",
     }.get(session.status, session.status)
@@ -271,17 +256,25 @@ def _total_latency_ms(session: Session) -> float:
     return sum(turn.latency_ms for turn in session.agent_turns)
 
 
-# ── Streamlit UI ────────────────────────────────────────────────────────
+# Streamlit UI
 
 
 def _init_state() -> None:
+    # Read DEMO_MODE from environment — don't default to True when the user
+    # has set DEMO_MODE=false in their .env. Streamlit loads .env via Settings.
+    env_demo = os.environ.get("DEMO_MODE", "false").lower() in ("1", "true", "yes")
     st.session_state.setdefault("orchestrator", None)
     st.session_state.setdefault("orchestrator_key", None)
-    st.session_state.setdefault("demo_mode", True)
+    st.session_state.setdefault("demo_mode", env_demo)
     st.session_state.setdefault("current_session", None)
     st.session_state.setdefault("session_history", [])
     st.session_state.setdefault("running", False)
     st.session_state.setdefault("thread", None)
+    # Dev auto-login: when DEBUG=true, skip login screen and log in as admin.
+    debug_mode = os.environ.get("DEBUG", "false").lower() in ("1", "true", "yes")
+    if debug_mode and "role" not in st.session_state:
+        st.session_state.role = "admin"
+        st.session_state.username = "dev-auto-login"
 
 
 def _ensure_orchestrator() -> None:
@@ -291,6 +284,12 @@ def _ensure_orchestrator() -> None:
         settings = Settings(llm_provider="mock") if st.session_state.demo_mode else Settings()
         st.session_state.orchestrator = create_orchestrator(settings)
         st.session_state.orchestrator_key = provider_key
+
+
+@st.cache_data(ttl=30)
+def _get_health_status() -> str:
+    """Cached health check — runs at most every 30 seconds to avoid render lag."""
+    return overall_status(check_all())
 
 
 def _render_sidebar() -> None:
@@ -319,7 +318,7 @@ def _render_sidebar() -> None:
                 format_func=lambda sid: options[sid],
                 label_visibility="collapsed",
             )
-            if st.button("Load", use_container_width=True):
+            if st.button("Load", width="stretch"):
                 st.session_state.current_session = next(
                     s for s in history if s.session_id == selected_id
                 )
@@ -332,7 +331,7 @@ def _render_sidebar() -> None:
         st.subheader("System status")
         st.write(f"Version **{__version__}**")
         st.write(f"Uptime **{_uptime()}**")
-        status = overall_status(check_all())
+        status = _get_health_status()
         label = {
             "healthy": ":green[● healthy]",
             "degraded": ":orange[● degraded]",
@@ -340,6 +339,12 @@ def _render_sidebar() -> None:
         }[status]
         st.write(label)
         st.caption(f"Provider: **{st.session_state.orchestrator_key}**")
+        # Show logged-in user
+        username = st.session_state.get("username", "")
+        role = st.session_state.get("role", "")
+        if username:
+            st.caption(f"👤 **{username}** ({role})")
+
 
 
 def _render_input_form() -> None:
@@ -392,9 +397,12 @@ def _render_input_form() -> None:
                 height=90,
             )
 
+        is_viewer = st.session_state.get("role") == "viewer"
         submitted = st.form_submit_button(
-            "🚀 Analyze", use_container_width=True, disabled=st.session_state.running
+            "🚀 Analyze", width="stretch", disabled=st.session_state.running or is_viewer
         )
+        if is_viewer:
+            st.caption("🔒 Viewers cannot run new analyses.")
         if submitted:
             st.session_state.current_session = build_session(
                 project_name=project_name,
@@ -408,59 +416,98 @@ def _render_input_form() -> None:
                 settings=st.session_state.orchestrator.config,
             )
             session = st.session_state.current_session
-            # Capture the orchestrator NOW — the lambda runs in a thread later,
-            # when st.session_state may no longer be reachable (the old code
-            # bound the method at thread creation for the same reason).
             orchestrator = st.session_state.orchestrator
-            st.session_state.thread = threading.Thread(
-                # run() is async (round-3 P1) — this bridge runs the coroutine
-                # inside the background thread so the UI keeps polling progress.
-                target=lambda: asyncio.run(orchestrator.run(session)),
-                daemon=True,
-            )
-            st.session_state.running = True
-            st.session_state.thread.start()
+            
+            if os.environ.get("LLM_PROVIDER") == "mock":
+                # In tests, run synchronously to avoid AppTest thread hangs
+                session = asyncio.run(orchestrator.run(session))
+                st.session_state.current_session = session
+                
+                # Remember this session in the sidebar history
+                history = st.session_state.session_history
+                if not any(s.session_id == session.session_id for s in history):
+                    history.append(session)
+                    
+                st.session_state.running = False
+                st.rerun()
+            else:
+                q = queue.Queue()
+                st.session_state.token_queue = q
+                
+                def stream_callback(agent_type, chunk):
+                    q.put(chunk)
+                    
+                session.on_token = stream_callback
+                
+                def background_task() -> None:
+                    try:
+                        asyncio.run(orchestrator.run(session))
+                    finally:
+                        q.put(None)
+                
+                st.session_state.running = True
+                st.session_state.thread = threading.Thread(
+                    target=background_task,
+                    daemon=True,
+                )
+                st.session_state.thread.start()
+                st.rerun()
 
 
 def _render_progress() -> None:
-    """Poll the running pipeline and update the progress bar as turns complete."""
+    """Stream tokens to the UI while the background thread runs."""
     session = st.session_state.current_session
-    bar = st.progress(0.0, text="Starting the five-agent pipeline…")
-    status_box = st.empty()
+    if "token_queue" in st.session_state:
+        q = st.session_state.token_queue
 
-    thread = st.session_state.thread
-    while thread is not None and thread.is_alive():
-        completed = len(session.agent_turns)
-        fraction = min(completed / _TOTAL_STEPS, 1.0)
-        bar.progress(fraction)
-        if completed < len(_PIPELINE_TYPES):
-            name = agent_display_name(_PIPELINE_TYPES[min(completed, len(_PIPELINE_TYPES) - 1)])
-            status_box.info(f"Running **{name}**…")
-        else:
-            status_box.info("Resolving conflicts and generating artifacts…")
-        time.sleep(0.05)
+        def token_generator():
+            while True:
+                try:
+                    token = q.get(timeout=60)  # 60s max wait per token
+                except Exception:
+                    break
+                if token is None:
+                    break
+                yield token
 
-    # Thread finished — refresh the bar to full and show the outcome.
-    completed = len(session.agent_turns)
-    bar.progress(min(completed / _TOTAL_STEPS, 1.0))
-    if session.status == "completed":
-        status_box.success(f"Analysis complete in {_total_latency_ms(session):,.0f} ms.")
+        st.markdown("### ⚙️ Pipeline Execution Stream")
+        st.write_stream(token_generator())
+        # Stream is done — clean up queue and re-read session state
+        del st.session_state["token_queue"]
     else:
-        message = session.error_message or (
-            "Analysis failed or was interrupted — see the Agents tab."
+        with st.spinner("Running analysis..."):
+            thread = st.session_state.get("thread")
+            if thread:
+                thread.join(timeout=300)
+
+    # Re-read from session_state — the background thread updates the session in-place
+    session = st.session_state.current_session
+    if session.status == "completed":
+        st.success(f"✅ Analysis complete in {_total_latency_ms(session):,.0f} ms.")
+    elif session.status == "pending_approval":
+        st.warning(
+            f"✋ Analysis finished in {_total_latency_ms(session):,.0f} ms. "
+            "Design is pending HITL approval."
         )
-        status_box.error(clean_output(message))
+    else:
+        message = getattr(session, "error_message", None) or (
+            "Analysis failed or was interrupted — check Azure OpenAI credentials."
+        )
+        st.error(clean_output(message))
 
     st.session_state.running = False
     st.session_state.thread = None
 
-    # Remember this session in the sidebar history.
+    # Save to sidebar history
     history = st.session_state.session_history
     if not any(s.session_id == session.session_id for s in history):
         history.append(session)
 
+    # Trigger a rerun so the results tabs appear immediately
+    st.rerun()
 
-# ── Result tabs ─────────────────────────────────────────────────────────
+
+# Result tabs
 
 
 def _render_overview_tab(session: Session) -> None:
@@ -473,6 +520,19 @@ def _render_overview_tab(session: Session) -> None:
     k4.metric("Artifacts", len(session.artifacts))
     st.write(f"Status: {session_status_badge(session)}")
     st.write(f"Budget: **{format_currency(session.budget)}**")
+
+    if session.status == "pending_approval":
+        st.warning("This design is pending Human-in-the-Loop (HITL) approval before artifacts are generated.")
+        role = st.session_state.get("role", "viewer")
+        if role == "admin":
+            if st.button("Approve Design & Generate Artifacts", type="primary"):
+                orchestrator = st.session_state.orchestrator
+                # Run the resume coroutine in a background thread or synchronously
+                session = asyncio.run(orchestrator.resume_approval(session))
+                st.session_state.current_session = session
+                st.rerun()
+        else:
+            st.info("You do not have the Admin role required to approve this design.")
 
     _render_live_pricing(session)
 
@@ -568,6 +628,20 @@ def _render_conflicts_tab(session: Session) -> None:
 
 def _render_artifacts_tab(session: Session) -> None:
     st.subheader("Generated artifacts")
+    
+    if session.status == "pending_approval":
+        st.warning("Architecture design is complete. Pending Human-in-the-Loop (HITL) review.")
+        role = st.session_state.get("role", "")
+        if can_approve(role):
+            st.info(f"You are logged in as **{role}**. You can approve this design to generate artifacts.")
+            if st.button("Approve Architecture & Generate Artifacts", type="primary"):
+                orchestrator = st.session_state.orchestrator
+                orchestrator.approve_session(session)
+                st.rerun()
+        else:
+            st.info(f"You are logged in as **{role}**. You do not have permission to approve deployments. Waiting for a reviewer or admin.")
+        return
+        
     if not session.artifacts:
         st.info("No artifacts generated.")
         return
@@ -607,39 +681,55 @@ def _render_results(session: Session) -> None:
         _render_artifacts_tab(session)
 
 
-# ── Entry point ─────────────────────────────────────────────────────────
+# Entry point
 
 
 def _render_auth_gate(settings: Settings) -> None:
-    """Phase 15 scaffold — require a signed-in identity before the dashboard.
-
-    The external review's #1 production risk was "no authentication: anyone
-    who can reach the dashboard can run analyses and burn LLM credits." When
-    ``auth_enabled`` is false (demo/local, the default) this is a no-op so the
-    dashboard and its AppTest suite behave exactly as before. When enabled:
-
-    - Streamlit >= 1.42 exposes the native OIDC surface (``st.user`` /
-      ``st.login``) configured in ``.streamlit/secrets.toml`` — the same flow
-      documented for Azure App Service with Microsoft Entra ID.
-    - If the running Streamlit build has no login API, the app fails closed
-      with a clear message instead of silently serving unauthenticated
-      traffic.
-    """
+    """Renders either an OIDC gate or a local mock login screen."""
     if not settings.auth_enabled:
-        return
+        # Local mock RBAC login
+        if "role" not in st.session_state:
+            st.session_state.role = None
+
+        if st.session_state.role is not None:
+            return
+
+        st.title("☁️ CloudOptima (Local Dev)")
+        st.info("Log in with a mock account (viewer, reviewer, admin).")
+        
+        with st.form("mock_login"):
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            submit = st.form_submit_button("Sign In")
+            
+            if submit:
+                profile = authenticate(username, password)
+                if profile:
+                    st.session_state.role = profile["role"]
+                    st.session_state.username = profile["username"]
+                    st.rerun()
+                else:
+                    st.error("Invalid credentials.")
+        st.stop()
+
     if hasattr(st, "user") and st.user.is_logged_in:
+        groups = st.user.get("groups", [])
+        if "ArchitectsGroup" in groups or "AdminGroup" in groups:
+            st.session_state.role = "admin"
+        elif "ReviewersGroup" in groups:
+            st.session_state.role = "reviewer"
+        else:
+            st.session_state.role = "viewer"
         return
+        
     st.title("☁️ CloudOptima")
     st.warning("This dashboard requires a Microsoft account to continue.")
     if hasattr(st, "login"):
         st.button("Sign in with Microsoft", on_click=st.login)
     else:
-        st.error(
-            "Authentication is enabled (AUTH_ENABLED=true) but this Streamlit "
-            "build has no native login API. Upgrade to Streamlit >= 1.42 or "
-            "put Azure App Service Easy Auth in front of the app."
-        )
+        st.error("Streamlit native Auth API missing.")
     st.stop()
+
 
 
 def main() -> None:
@@ -649,6 +739,16 @@ def main() -> None:
         page_icon="☁️",
         layout="wide",
         initial_sidebar_state="expanded",
+    )
+
+    # Phase 7 (Security): Inject Content Security Policy via meta tag
+    # Prevents XSS execution even if HTML is somehow rendered in the UI
+    st.markdown(
+        """
+        <meta http-equiv="Content-Security-Policy" 
+              content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:;">
+        """,
+        unsafe_allow_html=True
     )
 
     _init_state()

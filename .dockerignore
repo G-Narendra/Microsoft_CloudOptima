@@ -32,9 +32,10 @@ logs/
 *.db
 results/
 
-# Local docs & personal files (never needed at runtime)
+# Local docs & personal files
 docs/
 *.md
+!README.md
 narendra_doc.html
 review_cloudoptima.md
 

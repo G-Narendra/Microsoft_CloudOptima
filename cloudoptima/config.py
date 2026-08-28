@@ -1,9 +1,4 @@
-"""Type-safe application settings.
-
-Loads from environment variables and ``.env`` (via pydantic-settings) and
-redacts every secret field from ``repr``/``str`` so keys never show up in
-logs or error messages.
-"""
+"""Type-safe application settings with automatic secret redaction."""
 
 from __future__ import annotations
 
@@ -12,9 +7,16 @@ from typing import Annotated
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+try:
+    from azure.identity import DefaultAzureCredential
+    from azure.keyvault.secrets import SecretClient
+    HAS_AZURE_IDENTITY = True
+except ImportError:
+    HAS_AZURE_IDENTITY = False
+
 
 class Settings(BaseSettings):
-    """Application settings loaded from .env and environment variables."""
+    """Application settings loaded from environment and .env files."""
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -23,13 +25,10 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
-    # ── LLM Provider & API Keys ───────────────────────
+    # LLM Provider & API Keys
     llm_provider: str = Field(
         default="mock",
-        description="LLM provider: mock, nvidia, azure, openai, anthropic, google",
-    )
-    nvidia_api_key: SecretStr = Field(
-        default=SecretStr(""), description="Nvidia NIM API key"
+        description="LLM provider: mock, azure, openai, anthropic, google, nvidia",
     )
     azure_openai_endpoint: str = Field(
         default="", description="Azure OpenAI Endpoint URL"
@@ -40,9 +39,8 @@ class Settings(BaseSettings):
     azure_openai_api_version: str = Field(
         default="2024-02-01", description="Azure OpenAI API version"
     )
-    # Phase 7.6: direct OpenAI, Anthropic Claude, and Google Gemini.
     openai_api_key: SecretStr = Field(
-        default=SecretStr(""), description="OpenAI (direct) API key"
+        default=SecretStr(""), description="OpenAI API key"
     )
     anthropic_api_key: SecretStr = Field(
         default=SecretStr(""), description="Anthropic Claude API key"
@@ -50,8 +48,11 @@ class Settings(BaseSettings):
     google_api_key: SecretStr = Field(
         default=SecretStr(""), description="Google Gemini API key"
     )
+    nvidia_api_key: SecretStr = Field(
+        default=SecretStr(""), description="Nvidia NIM API key"
+    )
 
-    # ── Model Settings ───────────────────────────────
+    # Model Settings
     llm_model: str = Field(
         default="gpt-4o-mini", description="Primary model name"
     )
@@ -62,17 +63,14 @@ class Settings(BaseSettings):
         default=30, description="Model request timeout in seconds"
     )
 
-    # ── Cost-aware LLM routing (Phase 7.5) ────────────────────────
+    # Cost-aware LLM routing
     routing_enabled: bool = Field(
         default=False,
         description="Route calls across providers cheapest-first with failover",
     )
-    # NoDecode: the env var form is a plain comma string ("nvidia,azure"),
-    # which pydantic-settings would otherwise try to JSON-decode and fail on.
     routing_providers: Annotated[list[str], NoDecode] = Field(
-        default_factory=lambda: ["openai", "azure", "anthropic", "google", "nvidia"],
-        description="Providers eligible for routing "
-        "(mock, nvidia, azure, openai, anthropic, google)",
+        default_factory=lambda: ["openai", "azure", "anthropic", "google"],
+        description="Providers eligible for routing",
     )
     routing_max_cost_per_request: float = Field(
         default=0.005,
@@ -81,15 +79,7 @@ class Settings(BaseSettings):
     routing_timeout: float = Field(
         default=10.0,
         gt=0.0,
-        description="Per-provider timeout in seconds for routed clients (fail fast)",
-    )
-    llm_nvidia_model: str = Field(
-        default="meta/llama-3.3-70b-instruct",
-        description="Nvidia NIM smart-tier model (Architect, Judge)",
-    )
-    llm_nvidia_fast_model: str = Field(
-        default="meta/llama-3.1-8b-instruct",
-        description="Nvidia NIM fast-tier model (Cost, Security, Compliance)",
+        description="Per-provider timeout in seconds for routed clients",
     )
     llm_azure_model: str = Field(
         default="gpt-4o-mini", description="Azure OpenAI smart-tier model"
@@ -97,12 +87,11 @@ class Settings(BaseSettings):
     llm_azure_fast_model: str = Field(
         default="gpt-4o-mini", description="Azure OpenAI fast-tier model"
     )
-    # Phase 7.6: smart/fast models per provider.
     llm_openai_model: str = Field(
-        default="gpt-4o-mini", description="OpenAI (direct) smart-tier model"
+        default="gpt-4o-mini", description="OpenAI smart-tier model"
     )
     llm_openai_fast_model: str = Field(
-        default="gpt-4o-mini", description="OpenAI (direct) fast-tier model"
+        default="gpt-4o-mini", description="OpenAI fast-tier model"
     )
     llm_anthropic_model: str = Field(
         default="claude-3-5-sonnet-20241022",
@@ -118,26 +107,29 @@ class Settings(BaseSettings):
     llm_google_fast_model: str = Field(
         default="gemini-2.0-flash", description="Google Gemini fast-tier model"
     )
+    llm_nvidia_model: str = Field(
+        default="meta/llama-3.3-70b-instruct", description="Nvidia NIM smart-tier model"
+    )
+    llm_nvidia_fast_model: str = Field(
+        default="meta/llama-3.1-8b-instruct", description="Nvidia NIM fast-tier model"
+    )
 
-    # ── Debug & Operational Toggles ──────────────────
+    # Operational toggles
     debug: bool = Field(
-        default=False, description="Enable debug logging and verbose output"
+        default=False, description="Enable debug logging"
     )
     demo_mode: bool = Field(
         default=True,
-        description="Enable demo mode (uses MockClient, no API calls)",
+        description="Enable demo mode (uses MockClient)",
     )
 
-    # ── Rate Limiting ─────────────────────────────────
+    # Rate Limiting
     rate_limit_per_session: int = Field(
         default=1, description="Max concurrent requests per session"
     )
     rate_limit_global_per_hour: int = Field(
         default=60, description="Max requests globally per hour"
     )
-    # Round-3 review P2: the old limiter was an in-memory dict, so a 3-worker
-    # scale-out turned the "60/hour" quota into 180/hour. The backend is now
-    # pluggable — "memory" for a single process, "redis" for a shared store.
     rate_limit_backend: str = Field(
         default="memory",
         description="Rate-limit store backend: memory or redis",
@@ -146,15 +138,30 @@ class Settings(BaseSettings):
         default="", description="redis:// URL used when rate_limit_backend=redis"
     )
 
-    # ── Azure Settings ───────────────────────────────
+    # Azure Settings
     azure_subscription_id: str = Field(
         default="", description="Target Azure Subscription ID"
     )
     azure_default_region: str = Field(
         default="uaenorth", description="Default Azure region for deployments"
     )
+    azure_keyvault_url: str = Field(
+        default="", description="Azure Key Vault URL for secret resolution"
+    )
+    azure_search_endpoint: str = Field(
+        default="", description="Azure AI Search endpoint URL"
+    )
+    azure_search_api_key: SecretStr = Field(
+        default=SecretStr(""), description="Azure AI Search API key"
+    )
+    azure_search_index_name: str = Field(
+        default="compliance-docs", description="Azure AI Search index name"
+    )
+    azure_openai_embedding_deployment: str = Field(
+        default="text-embedding-3-large", description="Azure OpenAI embedding deployment name"
+    )
 
-    # ── Cache Settings ───────────────────────────────
+    # Cache Settings
     cache_ttl_hours: int = Field(
         default=24, description="Cache time-to-live in hours"
     )
@@ -162,7 +169,7 @@ class Settings(BaseSettings):
         default=200, description="Maximum cache storage size in MB"
     )
 
-    # ── Observability ─────────────────────────────────
+    # Observability
     log_level: str = Field(default="INFO", description="Logging level")
     audit_log_dir: str = Field(
         default="logs", description="Directory for audit log output"
@@ -171,7 +178,7 @@ class Settings(BaseSettings):
         default=90, description="Audit log retention period in days"
     )
 
-    # ── Security & Validation ─────────────────────────
+    # Security & Validation
     max_input_length: int = Field(
         default=5000, description="Maximum allowed input length in characters"
     )
@@ -187,14 +194,9 @@ class Settings(BaseSettings):
         description="List of suspicious/blocked input patterns",
     )
 
-    # ── Azure AI Content Safety (issue #2, OPTIONAL) ───
-    # ML-based harm moderation + Prompt Shields. Off by default; when the
-    # endpoint+key are set and content_safety_enabled is true, the regex layer
-    # in sanitize.py is backed by Azure's detectors. Missing credentials
-    # degrade to "no verdict" — the app never breaks without them (same
-    # contract as the live pricing module).
+    # Azure AI Content Safety
     content_safety_endpoint: str = Field(
-        default="", description="Azure AI Content Safety endpoint (empty = feature off)"
+        default="", description="Azure AI Content Safety endpoint"
     )
     content_safety_api_key: SecretStr = Field(
         default=SecretStr(""), description="Azure AI Content Safety API key"
@@ -203,61 +205,49 @@ class Settings(BaseSettings):
         default=4,
         ge=0,
         le=6,
-        description="Block severity threshold: 0-6 (4 = Medium and above blocks)",
+        description="Block severity threshold: 0-6",
     )
     content_safety_enabled: bool = Field(
         default=False,
-        description="Enable Azure ML content moderation + prompt shields",
+        description="Enable Azure ML content moderation and prompt shields",
     )
 
-    # ── Governance (issue #5, OPTIONAL) ────────────────
-    # Every tool call is checked against a declarative policy before it runs
-    # (allow / deny / require_approval). Delegates to Microsoft's Agent
-    # Governance Toolkit when installed; a mirrored built-in policy keeps the
-    # contract identical without it.
+    # Governance
     governance_enabled: bool = Field(
         default=True,
-        description="Enforce the tool-action policy on every tool call",
+        description="Enforce tool action policy on tool execution",
     )
 
-    # ── Authentication (Phase 15 scaffold) ──────────────
-    # Production deployments must not serve the dashboard to anonymous
-    # users. When ``auth_enabled`` is true the dashboard requires a signed-in
-    # identity (Microsoft Entra ID via Streamlit's native OIDC login, or App
-    # Service Easy Auth in front of the app) before rendering anything.
-    # Default off so demo mode and the test suite behave exactly as before.
+    # Authentication
     auth_enabled: bool = Field(
         default=False,
-        description="Require login before the dashboard renders (Entra ID / OIDC)",
+        description="Require login before dashboard renders",
     )
     auth_provider: str = Field(
         default="entra_id",
-        description="Identity provider: entra_id (Microsoft Entra ID via OIDC)",
+        description="Identity provider name",
     )
     auth_client_id: str = Field(
-        default="", description="OIDC application (client) ID"
+        default="", description="OIDC application client ID"
     )
     auth_client_secret: SecretStr = Field(
         default=SecretStr(""), description="OIDC client secret"
     )
     auth_tenant_id: str = Field(
-        default="", description="Entra ID tenant id (or 'common')"
+        default="", description="Entra ID tenant ID"
     )
     auth_redirect_uri: str = Field(
         default="",
-        description="OIDC redirect URI (the deployed dashboard URL)",
+        description="OIDC redirect URI",
     )
 
-    # ── Tool-calling / MCP (issue #7, OPTIONAL) ────────
-    # The tool registry (live pricing, compliance lookup) is always available
-    # in-process; mcp_enabled additionally routes calls over the Model Context
-    # Protocol via the mcp bridge (needs the optional 'mcp' package).
+    # Tools and MCP
     tools_enabled: bool = Field(
-        default=True, description="Expose the built-in tool registry to the pipeline"
+        default=True, description="Expose built-in tool registry to pipeline"
     )
     mcp_enabled: bool = Field(
         default=False,
-        description="Route tool calls over MCP (requires the optional 'mcp' package)",
+        description="Route tool calls over MCP",
     )
 
     @field_validator("llm_temperature")
@@ -279,7 +269,7 @@ class Settings(BaseSettings):
     @field_validator("rate_limit_backend")
     @classmethod
     def validate_rate_limit_backend(cls, v: str) -> str:
-        """Only memory and redis are valid rate-limit backends."""
+        """Validate rate-limit store backend name."""
         allowed = {"memory", "redis"}
         if v.lower() not in allowed:
             raise ValueError(
@@ -299,7 +289,7 @@ class Settings(BaseSettings):
     @field_validator("routing_providers", mode="before")
     @classmethod
     def parse_routing_providers(cls, v: object) -> object:
-        """Accept a comma-separated env string ("nvidia,azure") or a list."""
+        """Accept comma-separated string or list."""
         if isinstance(v, str):
             return [item.strip() for item in v.split(",") if item.strip()]
         return v
@@ -307,13 +297,46 @@ class Settings(BaseSettings):
     @field_validator("routing_providers")
     @classmethod
     def validate_routing_providers(cls, v: list[str]) -> list[str]:
-        """Ensure every routing provider is one of the supported values."""
+        """Ensure all routing providers are supported."""
         allowed = {"mock", "nvidia", "azure", "openai", "anthropic", "google"}
         cleaned = [p.lower() for p in v]
         unknown = [p for p in cleaned if p not in allowed]
         if unknown:
             raise ValueError(f"routing_providers contains unknown provider(s): {unknown}")
         return cleaned
+
+    def model_post_init(self, __context: object) -> None:
+        """Resolve missing secrets from Azure Key Vault if configured."""
+        if not self.azure_keyvault_url or not HAS_AZURE_IDENTITY:
+            return
+
+        try:
+            credential = DefaultAzureCredential()
+            client = SecretClient(vault_url=self.azure_keyvault_url, credential=credential)
+        except Exception:
+            return
+
+        secret_fields = [
+            "nvidia_api_key",
+            "azure_openai_api_key",
+            "openai_api_key",
+            "anthropic_api_key",
+            "google_api_key",
+            "content_safety_api_key",
+            "auth_client_secret",
+            "azure_search_api_key",
+        ]
+
+        for field_name in secret_fields:
+            val = getattr(self, field_name)
+            if not val or not val.get_secret_value():
+                kv_secret_name = field_name.replace("_", "-")
+                try:
+                    secret_val = client.get_secret(kv_secret_name).value
+                    if secret_val:
+                        setattr(self, field_name, SecretStr(secret_val))
+                except Exception:
+                    pass
 
     def get_sensitive_fields(self) -> dict[str, str]:
         """Return dict of sensitive key names mapped to redacted string placeholders."""
@@ -330,17 +353,13 @@ class Settings(BaseSettings):
             "auth_client_secret": "***REDACTED***"
             if self.auth_client_secret.get_secret_value()
             else "",
+            "azure_search_api_key": "***REDACTED***"
+            if self.azure_search_api_key.get_secret_value()
+            else "",
         }
 
     def __repr__(self) -> str:
-        """Custom repr that masks sensitive API keys.
-
-        Every secret renders as the literal placeholder ``***REDACTED***`` —
-        not even the first three characters of a real key are shown. A leaked
-        prefix narrows the search space for an attacker reading logs or crash
-        reports (an external principal-engineer review finding), so masking is
-        all-or-nothing.
-        """
+        """Mask sensitive API keys in repr."""
         fields: list[str] = []
         for name, value in self.__dict__.items():
             if isinstance(value, SecretStr):
@@ -351,5 +370,5 @@ class Settings(BaseSettings):
         return f"Settings({', '.join(fields)})"
 
     def __str__(self) -> str:
-        """Custom str representation that masks sensitive fields."""
+        """Mask sensitive fields in str."""
         return repr(self)

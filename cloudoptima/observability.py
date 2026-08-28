@@ -1,132 +1,149 @@
-"""Observability: structured tracing, append-only audit logs, and @trace.
-
-The design is deliberately simple:
-- Every event lands as one JSON line in a daily file under ``log_dir``
-  (default ``logs/``). Files are append-only — never rewritten.
-- Logs older than :data:`RETENTION_DAYS` (90) get pruned on each write.
-- The :func:`trace` decorator records timing around any function.
-- API keys, passwords, and raw secrets are never written to logs.
-
-Example:
-    >>> from cloudoptima.observability import AuditLogger, TraceEvent, trace
-    >>> logger = AuditLogger()
-    >>> event = TraceEvent(
-    ...     event_type="agent_call", agent_name="Architect",
-    ...     latency_ms=120.5, tokens_used=450,
-    ... )
-    >>> logger.log(event)
-    >>> @trace("my_function")
-    ... def do_stuff():
-    ...     return 42
-"""
+"""Observability: structured tracing, append-only audit logs, and trace decorator."""
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, field
 import datetime
 import functools
 import json
 import logging
-import threading
-from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
 from pathlib import Path
+import threading
+import time
 from typing import Any, Final, TypeAlias, TypeVar
 
-# ── Module-level logger ────────────────────────────────────────────────
+try:
+    from azure.monitor.opentelemetry import configure_azure_monitor
+    from opentelemetry import trace as otel_trace
+    HAS_OPENTELEMETRY = True
+    
+    try:
+        configure_azure_monitor()
+    except Exception:
+        pass
+    
+    _tracer = otel_trace.get_tracer(__name__)
+except ImportError:
+    HAS_OPENTELEMETRY = False
+    _tracer = None
+
 _logger = logging.getLogger(__name__)
 
-# ── Constants ──────────────────────────────────────────────────────────
-RETENTION_DAYS: Final[int] = 90  # Logs older than this are pruned
+RETENTION_DAYS: Final[int] = 90
 DEFAULT_LOG_DIR: Final[str] = "logs"
-_DATETIME_FMT: Final[str] = "%Y-%m-%dT%H:%M:%S.%fZ"  # ISO 8601 UTC
+_DATETIME_FMT: Final[str] = "%Y-%m-%dT%H:%M:%S.%fZ"
 
-# ── Type variables ─────────────────────────────────────────────────────
 F = TypeVar("F", bound=Callable[..., Any])
 JsonSerializable: TypeAlias = dict[str, Any] | list[Any] | str | int | float | bool | None
 
 
-# ── TraceEvent ─────────────────────────────────────────────────────────
 @dataclass
-class TraceEvent:
-    """One observable event — typed, timestamped, immutable.
-
-    Attributes:
-        event_type:  Category (e.g. "agent_call", "orchestrator_run", "cache_hit").
-        agent_name:  What produced it (e.g. "Architect", "LLMCache").
-        latency_ms:  Wall-clock time in milliseconds; 0 when not applicable.
-        tokens_used: Tokens consumed; 0 when unknown.
-        status:      Outcome — "success", "error", "warning", "rate_limited".
-        session_id:  Session this event belongs to, when there is one.
-        extra:       Arbitrary JSON-serialisable metadata (never secrets).
-    """
-
-    event_type: str = "generic"
-    agent_name: str = "unknown"
-    latency_ms: float = 0.0
-    tokens_used: int = 0
-    status: str = "success"
-    session_id: str = ""
-    extra: dict[str, JsonSerializable] = field(default_factory=dict)
-    _timestamp: str = field(default_factory=lambda: _utcnow_iso(), init=False, repr=False)
+class DriftMetric:
+    """MLOps model drift metric."""
+    metric_name: str
+    value: float
+    model_version: str
+    timestamp: str = field(default_factory=lambda: datetime.datetime.now(datetime.UTC).isoformat())
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to a JSON-friendly dict (includes computed _timestamp)."""
-        result = asdict(self)
-        result["timestamp"] = result.pop("_timestamp")
-        return result
+        return asdict(self)
+
+
+# TraceEvent
+
+@dataclass
+class TraceEvent:
+    """One observable event — typed, timestamped, immutable."""
+
+    event_type: str
+    agent_name: str = "unknown"
+    session_id: str | None = None
+    latency_ms: float = 0.0
+    tokens_used: int = 0
+    input_summary: dict[str, JsonSerializable] = field(default_factory=dict)
+    output_summary: dict[str, JsonSerializable] = field(default_factory=dict)
+    cache_hit: bool = False
+    validation_passed: bool = True
+    error_message: str | None = None
+    metadata: dict[str, JsonSerializable] = field(default_factory=dict)
+    timestamp: str = field(default_factory=lambda: datetime.datetime.now(datetime.UTC).strftime(_DATETIME_FMT))
+    trace_id: str | None = None
+    span_id: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to a JSON-serializable dictionary."""
+        return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> TraceEvent:
-        """Deserialise from a dict (restores _timestamp from 'timestamp' key).
-
-        Note: _timestamp is init=False on the dataclass, so we bypass the
-        constructor and set it directly via object.__setattr__.
-        """
-        raw = dict(data)
-        timestamp_str: str = raw.pop("timestamp", _utcnow_iso())
-        # Ignore unknown keys so a corrupt or hostile log line can never crash
-        # the reader — unmatched keys would otherwise raise TypeError here.
-        known = {name for name in cls.__dataclass_fields__ if name != "_timestamp"}
-        filtered = {k: v for k, v in raw.items() if k in known}
-        result = cls(**filtered)
-        object.__setattr__(result, "_timestamp", timestamp_str)
-        return result
+        """Construct a TraceEvent from a dictionary."""
+        known_fields = cls.__dataclass_fields__.keys()
+        filtered = {k: v for k, v in data.items() if k in known_fields}
+        return cls(**filtered)
 
 
-# ── AuditLogger — append-only JSONL ────────────────────────────────────
+_global_logger: AuditLogger | None = None
+
+
+def get_audit_logger() -> AuditLogger:
+    global _global_logger
+    if _global_logger is None:
+        _global_logger = AuditLogger()
+    return _global_logger
+
+
+# AuditLogger — append-only JSONL
+
 class AuditLogger:
-    """Append-only daily JSONL audit log.
-
-    Layout:
-        logs/audit-2026-07-30.jsonl   (one JSON object per line)
-
-    Writes are lock-guarded and old files are pruned after
-    :data:`RETENTION_DAYS`. A logging failure never breaks the caller — it's
-    caught, logged, and the event is dropped.
-    """
+    """Append-only daily JSONL audit log."""
 
     def __init__(self, log_dir: str | Path = DEFAULT_LOG_DIR) -> None:
         self._log_dir = Path(log_dir)
         self._lock = threading.Lock()
         self._log_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── Public API ─────────────────────────────────────────────────
+    # Public API
 
     def log(self, event: TraceEvent) -> None:
         """Append one event to today's audit file. Thread-safe."""
+        if HAS_OPENTELEMETRY:
+            span_context = otel_trace.get_current_span().get_span_context()
+            if span_context.is_valid:
+                if not event.trace_id:
+                    event.trace_id = format(span_context.trace_id, "032x")
+                if not event.span_id:
+                    event.span_id = format(span_context.span_id, "016x")
+
         try:
             line = json.dumps(event.to_dict(), default=str, ensure_ascii=False)
             path = self._daily_path()
             with self._lock:
                 with open(path, "a", encoding="utf-8") as fh:
                     fh.write(line + "\n")
-                    fh.flush()  # Ensure durability
-            # Opportunistic prune — once per write
+                    fh.flush()
             self._prune_old_logs()
         except OSError:
             _logger.exception("AuditLogger: failed to write event")
         except Exception:
             _logger.exception("AuditLogger: unexpected error — event dropped")
+
+    def log_drift(self, drift: DriftMetric) -> None:
+        """Write a drift metric to a separate daily JSONL file."""
+        if not self._log_dir.exists():
+            self._log_dir.mkdir(parents=True, exist_ok=True)
+            
+        today = datetime.date.today()
+        path = self._log_dir / f"drift-{today.isoformat()}.jsonl"
+        line = json.dumps(drift.to_dict(), separators=(",", ":"))
+        try:
+            with self._lock:
+                with open(path, "a", encoding="utf-8") as fh:
+                    fh.write(line + "\n")
+                    fh.flush()
+        except OSError:
+            _logger.exception("AuditLogger: failed to write drift metric")
 
     def query(
         self,
@@ -135,17 +152,7 @@ class AuditLogger:
         agent_name: str | None = None,
         event_type: str | None = None,
     ) -> list[TraceEvent]:
-        """Filter events across log files within a date range.
-
-        Args:
-            start:  Inclusive start date (defaults to RETENTION_DAYS ago).
-            end:    Inclusive end date (defaults to today).
-            agent_name:  Optional filter by agent name.
-            event_type:  Optional filter by event type.
-
-        Returns:
-            Chronologically ordered list of matching TraceEvent objects.
-        """
+        """Filter events across log files within a date range."""
         today = datetime.date.today()
         start = start or (today - datetime.timedelta(days=RETENTION_DAYS))
         end = end or today
@@ -165,7 +172,7 @@ class AuditLogger:
         """The directory where audit files are stored."""
         return self._log_dir
 
-    # ── Internal helpers ───────────────────────────────────────────
+    # Internal helpers
 
     def _daily_path(self, day: datetime.date | None = None) -> Path:
         day = day or datetime.date.today()
@@ -215,98 +222,102 @@ class AuditLogger:
     @staticmethod
     def _prune_single(path: Path, cutoff: datetime.date) -> None:
         try:
-            # audit-2026-04-01.jsonl → 2026-04-01
             date_str = path.stem.replace("audit-", "", 1)
             file_date = datetime.date.fromisoformat(date_str)
             if file_date < cutoff:
                 path.unlink()
                 _logger.info("AuditLogger: pruned old log %s", path.name)
         except (ValueError, OSError):
-            pass  # Skip files with unexpected naming
+            pass
 
 
-# ── Singleton logger instance ──────────────────────────────────────────
-_audit_logger: AuditLogger | None = None
-_audit_logger_lock = threading.Lock()
+# @trace decorator
 
-
-def get_audit_logger(log_dir: str | Path | None = None) -> AuditLogger:
-    """Return the shared AuditLogger instance (lazily initialised)."""
-    global _audit_logger
-    if _audit_logger is None:
-        with _audit_logger_lock:
-            if _audit_logger is None:
-                _audit_logger = AuditLogger(log_dir or DEFAULT_LOG_DIR)
-    return _audit_logger
-
-
-# ── @trace decorator ───────────────────────────────────────────────────
 def trace(
     event_type: str = "function_call",
     agent_name: str = "unknown",
     logger: AuditLogger | None = None,
 ) -> Callable[[F], F]:
-    """Decorator — auto-log a TraceEvent around any function.
+    """Decorator to auto-log a TraceEvent around any function."""
 
-    Records the function name, arguments summary, return status, and
-    wall-clock latency. Never logs secrets.
-
-    Args:
-        event_type:  Category label for the event.
-        agent_name:  Component identifier.
-        logger:      AuditLogger instance (uses global singleton if None).
-
-    Example:
-        >>> @trace("agent_call", "Architect")
-        ... def analyze(session):
-        ...     return {"result": "ok"}
-
-    The decorator will emit one TraceEvent on success and one on error.
-    """
     def decorator(func: F) -> F:
+        func_name = getattr(func, "__qualname__", getattr(func, "__name__", "unknown"))
+        effective_agent = agent_name if agent_name != "unknown" else func_name
+
         @functools.wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> Any:
-            _log = logger or get_audit_logger()
+        def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
+            audit = logger or get_audit_logger()
+            session_id = _extract_session_id(args, kwargs)
             start = _now_monotonic()
+            error_msg: str | None = None
+            result: Any = None
 
             try:
                 result = func(*args, **kwargs)
-                latency = (_now_monotonic() - start) * 1000  # ms
-
-                event = TraceEvent(
-                    event_type=event_type,
-                    agent_name=agent_name,
-                    latency_ms=round(latency, 2),
-                    status="success",
-                    extra=_safe_args(func.__name__, args, kwargs),
-                )
-                _log.log(event)
                 return result
-
             except Exception as exc:
-                latency = (_now_monotonic() - start) * 1000
-
+                error_msg = f"{type(exc).__name__}: {exc}"
+                raise
+            finally:
+                elapsed_ms = (_now_monotonic() - start) * 1000.0
                 event = TraceEvent(
                     event_type=event_type,
-                    agent_name=agent_name,
-                    latency_ms=round(latency, 2),
-                    status="error",
-                    extra={
-                        "function": func.__name__,
-                        "error_type": type(exc).__name__,
-                        "error_message": str(exc),
-                    },
+                    agent_name=effective_agent,
+                    session_id=session_id,
+                    latency_ms=round(elapsed_ms, 2),
+                    input_summary=_safe_args(func_name, args, kwargs),
+                    validation_passed=(error_msg is None),
+                    error_message=error_msg,
                 )
-                _log.log(event)
-                raise  # Re-raise — we only observe, we don't swallow
+                audit.log(event)
 
-        return wrapper  # type: ignore[return-value]
+        @functools.wraps(func)
+        async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+            audit = logger or get_audit_logger()
+            session_id = _extract_session_id(args, kwargs)
+            start = _now_monotonic()
+            error_msg: str | None = None
+            result: Any = None
+
+            try:
+                result = await func(*args, **kwargs)
+                return result
+            except Exception as exc:
+                error_msg = f"{type(exc).__name__}: {exc}"
+                raise
+            finally:
+                elapsed_ms = (_now_monotonic() - start) * 1000.0
+                event = TraceEvent(
+                    event_type=event_type,
+                    agent_name=effective_agent,
+                    session_id=session_id,
+                    latency_ms=round(elapsed_ms, 2),
+                    input_summary=_safe_args(func_name, args, kwargs),
+                    validation_passed=(error_msg is None),
+                    error_message=error_msg,
+                )
+                audit.log(event)
+
+        if asyncio.iscoroutinefunction(func):
+            return async_wrapper  # type: ignore[return-value]
+        return sync_wrapper  # type: ignore[return-value]
 
     return decorator
 
 
-# ── Anomaly detection (Phase 10.2) ─────────────────────────────────────
+def _extract_session_id(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str | None:
+    """Best-effort extraction of a session_id from args or kwargs."""
+    if "session_id" in kwargs and isinstance(kwargs["session_id"], str):
+        return kwargs["session_id"]
+    if "session" in kwargs and hasattr(kwargs["session"], "session_id"):
+        return str(kwargs["session"].session_id)
+    for arg in args:
+        if hasattr(arg, "session_id"):
+            return str(arg.session_id)
+    return None
 
+
+# Anomaly detection
 
 @dataclass
 class _AnomalyBaseline:
@@ -318,28 +329,11 @@ class _AnomalyBaseline:
 
 
 class AnomalyDetector:
-    """Flags unusually short/long responses and >50%% token drops (Phase 10.2).
-
-    Keeps an exponentially weighted moving average per agent type so baselines
-    adapt to model drift instead of going stale. No flags are raised during
-    the warm-up window (the first :attr:`WARMUP_SAMPLES` observations), so the
-    detector learns what "normal" looks like before it can cry wolf.
-
-    Thread-safe; this is a process-wide singleton shared by all agents.
-
-    Example:
-        >>> detector = AnomalyDetector()
-        >>> for _ in range(5):
-        ...     detector.record("architect", 1200, 400)
-        >>> detector.record("architect", 1200, 50)   # token collapse
-        ['token_usage_drop']
-    """
+    """Flags unusually short/long responses and token drops."""
 
     WARMUP_SAMPLES: Final[int] = 5
     ALPHA: Final[float] = 0.3
-    # Checklist 10.2: "track token usage — if drops >50% below normal, flag".
     TOKEN_DROP_FRACTION: Final[float] = 0.5
-    # "Track response length — if unusually short or long, flag".
     LENGTH_LOW_FRACTION: Final[float] = 0.4
     LENGTH_HIGH_FRACTION: Final[float] = 2.5
 
@@ -348,99 +342,79 @@ class AnomalyDetector:
         self._lock = threading.Lock()
 
     def record(self, agent: str, response_length: int, tokens_used: int) -> list[str]:
-        """Feed one observation and return the anomaly flags it raises.
-
-        Args:
-            agent:          The agent type name (baseline is per agent).
-            response_length: Raw response length in characters.
-            tokens_used:     Token count reported by the LLM (0 when unknown).
-
-        Returns:
-            A list of flag names — ``"token_usage_drop"`` and/or
-            ``"response_length_anomaly"`` — empty when the observation is
-            within the normal band.
-        """
+        """Feed one observation and return any anomaly flags raised."""
         flags: list[str] = []
         with self._lock:
             base = self._baselines.setdefault(agent, _AnomalyBaseline())
             if base.samples >= self.WARMUP_SAMPLES and base.length_ewma > 0:
-                if base.tokens_ewma > 0 and tokens_used < base.tokens_ewma * (
-                    1 - self.TOKEN_DROP_FRACTION
-                ):
-                    flags.append("token_usage_drop")
                 low = base.length_ewma * self.LENGTH_LOW_FRACTION
                 high = base.length_ewma * self.LENGTH_HIGH_FRACTION
                 if response_length < low or response_length > high:
                     flags.append("response_length_anomaly")
+
+            if (
+                base.samples >= self.WARMUP_SAMPLES
+                and tokens_used > 0
+                and base.tokens_ewma > 0
+            ):
+                drop_threshold = base.tokens_ewma * (1.0 - self.TOKEN_DROP_FRACTION)
+                if tokens_used < drop_threshold:
+                    flags.append("token_usage_drop")
+
             self._update(base, response_length, tokens_used)
         return flags
 
-    def baseline(self, agent: str) -> tuple[float, float]:
-        """Current ``(length, tokens)`` baseline for an agent, or ``(0.0, 0.0)``."""
+    def baseline_for(self, agent: str) -> dict[str, float | int]:
+        """Return a snapshot of the current baseline for ``agent``."""
         with self._lock:
             base = self._baselines.get(agent)
             if base is None:
-                return 0.0, 0.0
-            return base.length_ewma, base.tokens_ewma
+                return {"samples": 0, "length_ewma": 0.0, "tokens_ewma": 0.0}
+            return {
+                "samples": base.samples,
+                "length_ewma": round(base.length_ewma, 1),
+                "tokens_ewma": round(base.tokens_ewma, 1),
+            }
 
-    def reset(self) -> None:
-        """Clear all baselines (used between tests)."""
-        with self._lock:
-            self._baselines.clear()
-
-    @staticmethod
-    def _update(base: _AnomalyBaseline, response_length: int, tokens_used: int) -> None:
-        """Fold a new observation into the EWMA baseline."""
+    def _update(
+        self, base: _AnomalyBaseline, response_length: int, tokens_used: int
+    ) -> None:
+        """Update EWMA with one observation."""
         if base.samples == 0:
             base.length_ewma = float(response_length)
-            base.tokens_ewma = float(tokens_used)
+            base.tokens_ewma = float(tokens_used) if tokens_used > 0 else 0.0
         else:
             base.length_ewma = (
-                AnomalyDetector.ALPHA * response_length
-                + (1 - AnomalyDetector.ALPHA) * base.length_ewma
+                self.ALPHA * float(response_length)
+                + (1.0 - self.ALPHA) * base.length_ewma
             )
-            base.tokens_ewma = (
-                AnomalyDetector.ALPHA * tokens_used
-                + (1 - AnomalyDetector.ALPHA) * base.tokens_ewma
-            )
+            if tokens_used > 0:
+                if base.tokens_ewma == 0.0:
+                    base.tokens_ewma = float(tokens_used)
+                else:
+                    base.tokens_ewma = (
+                        self.ALPHA * float(tokens_used)
+                        + (1.0 - self.ALPHA) * base.tokens_ewma
+                    )
         base.samples += 1
 
 
-# ── Singleton anomaly detector ──────────────────────────────────────────
-_anomaly_detector: AnomalyDetector | None = None
-_anomaly_detector_lock = threading.Lock()
-
-
-def get_anomaly_detector() -> AnomalyDetector:
-    """Return the shared :class:`AnomalyDetector` (lazily initialised)."""
-    global _anomaly_detector
-    if _anomaly_detector is None:
-        with _anomaly_detector_lock:
-            if _anomaly_detector is None:
-                _anomaly_detector = AnomalyDetector()
-    return _anomaly_detector
-
-
-# ── Internal helpers ───────────────────────────────────────────────────
+# Internal helpers
 
 def _utcnow_iso() -> str:
-    """Return current UTC time as ISO 8601 string (microsecond precision)."""
+    """Return current UTC time as ISO 8601 string."""
     return datetime.datetime.now(datetime.UTC).strftime(_DATETIME_FMT)
 
 
 def _now_monotonic() -> float:
-    """Return monotonic clock value (for duration measurement)."""
-    import time
+    """Return monotonic clock value."""
     return time.monotonic()
 
 
 def _safe_args(
     func_name: str, args: tuple[Any, ...], kwargs: dict[str, Any]
 ) -> dict[str, JsonSerializable]:
-    """Build a safe summary of function arguments — never include secrets.
-
-    Only includes positional arg count and keyword arg names (not their values).
-    """
+    """Build a safe summary of function arguments."""
     return {
         "function": func_name,
         "arg_count": len(args),

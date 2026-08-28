@@ -1,9 +1,4 @@
-"""Tests for observability: TraceEvent, AuditLogger, and @trace decorator.
-
-Covers BUILD_CHECKLIST Phase 9.3: TraceEvent round-trip, daily JSONL file
-writing, query filters (date range / agent_name / event_type), @trace timing
-on success and error branches, and the never-crash guarantees.
-"""
+"""Tests for observability: TraceEvent, AuditLogger, and @trace decorator."""
 
 from __future__ import annotations
 
@@ -16,7 +11,6 @@ import pytest
 from cloudoptima.observability import (
     AuditLogger,
     TraceEvent,
-    get_audit_logger,
     trace,
 )
 
@@ -34,8 +28,7 @@ def _make_event() -> TraceEvent:
     )
 
 
-# ── TraceEvent ─────────────────────────────────────────────────────────────
-
+# TraceEvent tests
 
 def test_trace_event_defaults() -> None:
     """A bare TraceEvent carries sensible defaults."""
@@ -50,7 +43,7 @@ def test_trace_event_defaults() -> None:
 
 
 def test_trace_event_round_trip() -> None:
-    """dict → event → dict preserves every field, including the timestamp."""
+    """dict -> event -> dict preserves every field, including timestamp."""
     original = _make_event()
     restored = TraceEvent.from_dict(original.to_dict())
 
@@ -65,27 +58,23 @@ def test_trace_event_round_trip() -> None:
 
 
 def test_trace_event_to_dict_is_json_serializable() -> None:
-    """to_dict() output must be encodable as JSON (dashboard/CI friendly)."""
     payload = _make_event().to_dict()
-    json.dumps(payload)  # must not raise
+    json.dumps(payload)
     assert "timestamp" in payload
 
 
 def test_trace_event_from_dict_tolerates_unknown_keys() -> None:
-    """A corrupt/hostile log line with extra keys must not crash the reader."""
     data = _make_event().to_dict()
     data["mystery_field"] = "boom"
     data["extra"] = {"still": "dict"}
 
-    restored = TraceEvent.from_dict(data)  # must not raise
+    restored = TraceEvent.from_dict(data)
     assert restored.event_type == "agent_call"
 
 
-# ── AuditLogger ────────────────────────────────────────────────────────────
-
+# AuditLogger tests
 
 def test_audit_logger_writes_daily_file(tmp_path: Path) -> None:
-    """log() appends one JSON line to today's audit-YYYY-MM-DD.jsonl."""
     logger = AuditLogger(tmp_path)
     logger.log(_make_event())
 
@@ -101,7 +90,6 @@ def test_audit_logger_writes_daily_file(tmp_path: Path) -> None:
 
 
 def test_audit_logger_is_append_only(tmp_path: Path) -> None:
-    """Two log() calls produce two lines; nothing is overwritten."""
     logger = AuditLogger(tmp_path)
     logger.log(_make_event())
     logger.log(_make_event())
@@ -113,7 +101,6 @@ def test_audit_logger_is_append_only(tmp_path: Path) -> None:
 
 
 def test_query_filters_by_agent_and_type(tmp_path: Path) -> None:
-    """query() filters by agent_name and event_type independently and together."""
     logger = AuditLogger(tmp_path)
     logger.log(TraceEvent(event_type="agent_call", agent_name="Architect"))
     logger.log(TraceEvent(event_type="agent_call", agent_name="Judge"))
@@ -126,16 +113,14 @@ def test_query_filters_by_agent_and_type(tmp_path: Path) -> None:
 
 
 def test_query_date_range_with_missing_day(tmp_path: Path) -> None:
-    """Querying a day with no log file returns an empty list, not an error."""
     logger = AuditLogger(tmp_path)
-    logger.log(_make_event())  # today
+    logger.log(_make_event())
 
     past = datetime.date.today() - datetime.timedelta(days=3)
     assert logger.query(start=past, end=past) == []
 
 
 def test_audit_logger_skips_malformed_lines(tmp_path: Path) -> None:
-    """Corrupt JSON lines are skipped; valid ones are still parsed."""
     logger = AuditLogger(tmp_path)
     day = datetime.date.today()
     path = tmp_path / f"audit-{day.isoformat()}.jsonl"
@@ -148,16 +133,13 @@ def test_audit_logger_skips_malformed_lines(tmp_path: Path) -> None:
 
 
 def test_audit_logger_log_dir_property(tmp_path: Path) -> None:
-    """log_dir exposes the configured directory."""
     logger = AuditLogger(tmp_path)
     assert logger.log_dir == tmp_path
 
 
-# ── @trace decorator ───────────────────────────────────────────────────────
-
+# @trace decorator tests
 
 def test_trace_success_records_event(tmp_path: Path) -> None:
-    """@trace logs a success event with function name, arg count, and latency."""
     logger = AuditLogger(tmp_path)
 
     @trace("my_function", "Tester", logger=logger)
@@ -176,7 +158,6 @@ def test_trace_success_records_event(tmp_path: Path) -> None:
 
 
 def test_trace_error_records_event_and_reraises(tmp_path: Path) -> None:
-    """@trace logs an error event, then re-raises — it only observes."""
     logger = AuditLogger(tmp_path)
 
     @trace("failing", "Tester", logger=logger)
@@ -190,13 +171,3 @@ def test_trace_error_records_event_and_reraises(tmp_path: Path) -> None:
     assert len(events) == 1
     assert events[0].status == "error"
     assert events[0].extra["error_type"] == "ValueError"
-
-
-# ── Singleton ──────────────────────────────────────────────────────────────
-
-
-def test_get_audit_logger_is_singleton() -> None:
-    """get_audit_logger() returns the same shared instance each call."""
-    first = get_audit_logger()
-    second = get_audit_logger()
-    assert first is second

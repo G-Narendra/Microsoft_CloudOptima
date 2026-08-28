@@ -1,39 +1,4 @@
-"""Orchestrator — runs the five-agent pipeline (Phase 6).
-
-What happens, in order:
-
-1. The Architect runs first (everyone downstream reads its design), then the
-   three remaining specialists — Cost Analyst, Security, Compliance — run
-   **in parallel** via :func:`asyncio.gather`, since they only depend on the
-   architect's output. This was the round-3 review P1: the old synchronous
-   ``for`` loop serialized five LLM calls that are 99% network wait, so
-   throughput was artificially capped. Each turn lands on
-   ``session.agent_turns`` in pipeline order afterwards.
-2. Disagreements are detected across all **six** specialist pairs. Detection
-   is deterministic and keyed per pair — the budget check can only fire for
-   (Architect, Cost Analyst). (v1 lesson: it used to fire for every pair and
-   tripled the duplicates.) Schemas are read directly, so a key mismatch
-   between agents (compliance's ``rules`` vs security's ``findings``) can
-   never invent a conflict.
-3. The Judge arbitrates with all outputs + the conflicts; its resolutions are
-   folded back into the session, and conflicts it noticed but the detector
-   missed are adopted.
-4. Four artifacts are generated: Bicep template, cost forecast, compliance
-   report, arbitration summary. The IaC is malware-scanned before it's stored.
-
-Failure isolation: an agent that fails becomes an error turn and the pipeline
-keeps going. If anything unexpected still raises, ``run`` marks the session
-``failed`` and returns it — it never crashes the caller.
-
-``run`` is async (round-3 P1). Sync callers — the Streamlit dashboard thread,
-CLI, and tests — wrap it with :func:`asyncio.run`.
-
-Example:
-    >>> import asyncio
-    >>> from cloudoptima.orchestrator import Orchestrator
-    >>> orch = Orchestrator.from_settings(Settings())
-    >>> session = asyncio.run(orch.run(session))
-"""
+"""Orchestrator — runs the five-agent pipeline (Phase 6)."""
 
 from __future__ import annotations
 
@@ -54,10 +19,12 @@ from cloudoptima.mcp_bridge import get_tool_executor
 from cloudoptima.models import AgentTurn, AgentType, Artifact, Conflict, Session
 from cloudoptima.observability import TraceEvent, get_audit_logger
 from cloudoptima.sanitize import RateLimiter, clean_output, scan_for_malware_in_iac
+from cloudoptima.telemetry import get_tracer
 
 _logger = logging.getLogger(__name__)
+tracer = get_tracer()
 
-# ── Constants ───────────────────────────────────────────────────────────
+# Constants
 
 # Pipeline execution order — matches ALL_AGENTS in cloudoptima.agents.
 _PIPELINE_TYPES: Final[tuple[AgentType, ...]] = (
@@ -257,7 +224,30 @@ class Orchestrator:
         }
         return cls(agents=agents, config=settings, context=context)
 
-    # ── Pipeline ────────────────────────────────────────────────────────
+    async def resume_approval(self, session: Session) -> Session:
+        """Resume a pending_approval session, generate artifacts, and complete."""
+        with tracer.start_as_current_span("orchestrator_resume_approval") as span:
+            span.set_attribute("session_id", session.session_id)
+            if session.status != "pending_approval":
+                return session
+                
+            turns: dict[AgentType, AgentTurn] = {
+                t.agent_type: t for t in session.agent_turns
+            }
+            judge_turn = turns.get(AgentType.JUDGE)
+            if not judge_turn:
+                session.status = "failed"
+                session.error_message = "Cannot resume: missing judge turn."
+                return session
+
+            session.hitl_approved = True
+            session.artifacts = self._generate_artifacts(session, turns, judge_turn)
+            session.status = "completed"
+            session.updated_at = datetime.now(UTC)
+            self._log_run_event(session, time.time(), "success")
+            return session
+
+    # Pipeline
 
     async def run(self, session: Session) -> Session:
         """Execute the full pipeline over a session. Never raises. (async, P1)
@@ -325,64 +315,96 @@ class Orchestrator:
 
     async def _run_locked(self, session: Session, started: float) -> Session:
         """Execute the pipeline after the rate-limit gates have passed."""
-        session.status = "running"
-        session.updated_at = datetime.now(UTC)
-        session.error_message = ""
+        with tracer.start_as_current_span("orchestrator_run") as span:
+            span.set_attribute("session_id", session.session_id)
+            session.status = "running"
+            session.updated_at = datetime.now(UTC)
+            session.error_message = ""
 
-        # Deterministic re-runs: pipeline outputs are owned by run().
-        session.agent_turns = []
-        session.conflicts = []
-        session.artifacts = []
+            # Deterministic re-runs: pipeline outputs are owned by run().
+            session.agent_turns = []
+            session.conflicts = []
+            session.artifacts = []
 
-        turns: dict[AgentType, AgentTurn] = {}
-        try:
-            # The architect runs alone — every downstream agent reads its
-            # design via _prior_turn_json.
-            arch_turn = await self.agents[AgentType.ARCHITECT].analyze(session)
-            session.agent_turns.append(arch_turn)
-            turns[AgentType.ARCHITECT] = arch_turn
-            self._log_agent_failure(session, AgentType.ARCHITECT, arch_turn)
+            turns: dict[AgentType, AgentTurn] = {}
+            try:
+                # The architect runs alone — every downstream agent reads its
+                # design via _prior_turn_json.
+                arch_turn = await self.agents[AgentType.ARCHITECT].analyze(session)
+                session.agent_turns.append(arch_turn)
+                turns[AgentType.ARCHITECT] = arch_turn
+                self._log_agent_failure(session, AgentType.ARCHITECT, arch_turn)
 
-            # Cost / Security / Compliance only depend on the architect's
-            # output, so they can run concurrently (round-3 P1). gather()
-            # returns results in input order, so session.agent_turns stays
-            # deterministic even though the three calls overlap.
-            specialist_results = await asyncio.gather(
-                self.agents[AgentType.COST_ANALYST].analyze(session),
-                self.agents[AgentType.SECURITY].analyze(session),
-                self.agents[AgentType.COMPLIANCE].analyze(session),
-            )
-            for agent_type, turn in zip(
-                _SPECIALIST_TYPES, specialist_results, strict=True
-            ):
-                session.agent_turns.append(turn)
-                turns[agent_type] = turn
-                # Error taxonomy: record WHY a turn failed (llm / parse /
-                # validation / prompt_build) so the audit trail distinguishes a
-                # transient provider outage from a bad model response.
-                self._log_agent_failure(session, agent_type, turn)
+                # Cost / Security / Compliance only depend on the architect's
+                # output, so they can run concurrently (round-3 P1). gather()
+                # returns results in input order, so session.agent_turns stays
+                # deterministic even though the three calls overlap.
+                specialist_results = await asyncio.gather(
+                    self.agents[AgentType.COST_ANALYST].analyze(session),
+                    self.agents[AgentType.SECURITY].analyze(session),
+                    self.agents[AgentType.COMPLIANCE].analyze(session),
+                )
+                for agent_type, turn in zip(
+                    _SPECIALIST_TYPES, specialist_results, strict=True
+                ):
+                    session.agent_turns.append(turn)
+                    turns[agent_type] = turn
+                    # Error taxonomy: record WHY a turn failed (llm / parse /
+                    # validation / prompt_build) so the audit trail distinguishes a
+                    # transient provider outage from a bad model response.
+                    self._log_agent_failure(session, agent_type, turn)
 
-            session.conflicts = self._detect_conflicts(session, turns)
+                session.conflicts = self._detect_conflicts(session, turns)
 
-            judge_turn = await self.agents[AgentType.JUDGE].analyze(session)
-            session.agent_turns.append(judge_turn)
-            turns[AgentType.JUDGE] = judge_turn
-            self._log_agent_failure(session, AgentType.JUDGE, judge_turn)
+                judge_turn = await self.agents[AgentType.JUDGE].analyze(session)
+                session.agent_turns.append(judge_turn)
+                turns[AgentType.JUDGE] = judge_turn
+                self._log_agent_failure(session, AgentType.JUDGE, judge_turn)
 
-            self._apply_judge_resolutions(session, judge_turn)
+                self._apply_judge_resolutions(session, judge_turn)
+                
+                if session.hitl_approved:
+                    session.artifacts = self._generate_artifacts(session, turns, judge_turn)
+                    session.status = "completed"
+                    session.updated_at = datetime.now(UTC)
+                    self._log_run_event(session, started, "success")
+                    return session
+                else:
+                    # Wait for HITL approval
+                    session.status = "pending_approval"
+                    session.updated_at = datetime.now(UTC)
+                    return session
+            except Exception as exc:
+                _logger.exception("Orchestrator run failed for session %s", session.session_id)
+                session.status = "failed"
+                session.error_message = clean_output(str(exc))[:500]
+                self._log_run_event(session, started, "error", extra={"error": str(exc)})
+                return session
+
+    def approve_session(self, session: Session) -> Session:
+        """Approve a session and generate artifacts.
+        
+        Called by the HITL (Human-in-the-Loop) UI when a reviewer approves the architecture.
+        """
+        if session.status != "pending_approval":
+            return session
+            
+        session.hitl_approved = True
+        turns = {turn.agent_type: turn for turn in session.agent_turns}
+        judge_turn = turns.get(AgentType.JUDGE)
+        
+        if judge_turn:
             session.artifacts = self._generate_artifacts(session, turns, judge_turn)
             session.status = "completed"
-        except Exception as exc:
-            _logger.exception("Orchestrator run failed for session %s", session.session_id)
-            session.status = "failed"
-            session.error_message = clean_output(str(exc))[:500]
-            self._log_run_event(session, started, "error", extra={"error": str(exc)})
-            return session
-
-        self._log_run_event(session, started, "success")
+            session.updated_at = datetime.now(UTC)
+            # Log approval event
+            with tracer.start_as_current_span("orchestrator_approve") as span:
+                span.set_attribute("session_id", session.session_id)
+                self._log_run_event(session, time.time(), "approved")
+                
         return session
 
-    # ── Conflict detection ──────────────────────────────────────────────
+    # Conflict detection
 
     def _detect_conflicts(
         self,
@@ -543,7 +565,7 @@ class Orchestrator:
 
         return conflicts
 
-    # ── Judge arbitration ───────────────────────────────────────────────
+    # Judge arbitration
 
     def _apply_judge_resolutions(
         self,
@@ -638,7 +660,7 @@ class Orchestrator:
                 continue
         return parsed
 
-    # ── Artifact generation ─────────────────────────────────────────────
+    # Artifact generation
 
     def _generate_artifacts(
         self,
@@ -834,7 +856,7 @@ class Orchestrator:
             description=_ARTIFACT_DESCRIPTIONS["arbitration_summary"],
         )
 
-    # ── Observability ───────────────────────────────────────────────────
+    # Observability
 
     def _log_agent_failure(
         self,
@@ -897,7 +919,7 @@ class Orchestrator:
         except Exception:
             _logger.debug("Failed to log orchestrator run event", exc_info=True)
 
-    # ── Shared helpers ──────────────────────────────────────────────────
+    # Shared helpers
 
     @staticmethod
     def _output_of(

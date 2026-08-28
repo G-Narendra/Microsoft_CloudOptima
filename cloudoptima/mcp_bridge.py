@@ -1,18 +1,4 @@
-"""MCP bridge (issue #7) — tool calls over MCP, with a registry fallback.
-
-:class:`MCPBridge` gives callers one entry point for tools regardless of
-transport:
-
-- ``mode == "mcp"`` — a stdio client session talks to
-  :mod:`cloudoptima.mcp_server` (needs ``settings.mcp_enabled`` and the
-  optional ``mcp`` package).
-- ``mode == "registry"`` — calls execute directly through the in-process
-  :class:`cloudoptima.tools.ToolRegistry` (same tools, same governance).
-
-The bridge **never raises**: any MCP failure (missing package, subprocess
-error, timeouts) degrades to the registry for that call, so tool execution
-has no new failure mode.
-"""
+"""MCP bridge providing tool calls over MCP with registry fallback."""
 
 from __future__ import annotations
 
@@ -27,12 +13,11 @@ from cloudoptima.tools import get_registry
 
 _logger = logging.getLogger(__name__)
 
-try:  # pragma: no cover - exercised only when the mcp package is installed
+try:
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
-
     MCP_AVAILABLE = True
-except Exception:  # pragma: no cover - exercised only when the package is missing
+except Exception:
     MCP_AVAILABLE = False
 
 
@@ -44,7 +29,7 @@ class MCPBridge:
 
     @property
     def mode(self) -> str:
-        """``\"mcp\"`` when enabled + available, otherwise ``\"registry\"``."""
+        """Return 'mcp' when enabled and available, otherwise 'registry'."""
         if (
             self._settings is not None
             and self._settings.mcp_enabled
@@ -53,10 +38,10 @@ class MCPBridge:
             return "mcp"
         return "registry"
 
-    # ── Public API ──────────────────────────────────────────────────
+    # Public API
 
     def list_tools(self) -> list[dict[str, Any]]:
-        """Tool names + descriptions, from MCP or the registry."""
+        """List tool names and descriptions from MCP or the registry."""
         specs = get_registry().list_tools()
         fallback = [
             {
@@ -80,16 +65,38 @@ class MCPBridge:
         name: str,
         args: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Call one tool; never raises (MCP errors fall back to the registry)."""
+        """Call a tool; falls back to the registry on MCP errors."""
         if self.mode == "registry":
-            return get_registry().call(name, args or {}, self._settings)
-        try:
-            return asyncio.run(self._call_tool_mcp(name, args or {}))
-        except Exception as exc:
-            _logger.warning("MCP call %r failed — falling back to registry: %s", name, exc)
-            return get_registry().call(name, args or {}, self._settings)
+            result = get_registry().call(name, args or {}, self._settings)
+        else:
+            try:
+                result = asyncio.run(self._call_tool_mcp(name, args or {}))
+            except Exception as exc:
+                _logger.warning("MCP call %r failed — falling back to registry: %s", name, exc)
+                result = get_registry().call(name, args or {}, self._settings)
+        
+        return self._truncate_result(result)
 
-    # ── MCP transport (async internals) ─────────────────────────────
+    def _truncate_result(self, result: dict[str, Any], max_len: int = 4000) -> dict[str, Any]:
+        """Truncate large tool responses to preserve LLM context window."""
+        res_data = result.get("result")
+        if res_data is None:
+            return result
+            
+        try:
+            dumped = json.dumps(res_data)
+        except (TypeError, ValueError):
+            dumped = str(res_data)
+            
+        if len(dumped) > max_len:
+            _logger.info("Truncating tool result (%d bytes)", len(dumped))
+            truncated = dumped[:max_len] + "... [TRUNCATED to preserve context]"
+            result["result"] = truncated
+            result["truncated"] = True
+            
+        return result
+
+    # MCP transport internals
 
     @staticmethod
     def _server_params() -> StdioServerParameters:
@@ -132,7 +139,7 @@ class MCPBridge:
 
 
 def get_tool_executor(settings: Settings | None = None) -> MCPBridge:
-    """Convenience — build a bridge for the given settings."""
+    """Build a tool bridge for the given settings."""
     return MCPBridge(settings)
 
 
@@ -141,5 +148,5 @@ def call_tool(
     args: dict[str, Any] | None = None,
     settings: Settings | None = None,
 ) -> dict[str, Any]:
-    """One-shot tool call through the bridge (MCP or registry)."""
+    """Execute a single tool call through the bridge."""
     return MCPBridge(settings).call_tool(name, args)

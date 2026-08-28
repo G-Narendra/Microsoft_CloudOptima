@@ -23,8 +23,7 @@ from cloudoptima.pricing import (
 )
 from cloudoptima.pricing.azure_api import RETAIL_API_BASE, _cache, _cache_lock
 
-# ── Static catalog (Phase 8.3) ──────────────────────────────────────────
-
+# Static catalog tests
 
 class TestStaticCatalog:
     def test_known_services_have_prices(self) -> None:
@@ -66,8 +65,7 @@ class TestStaticCatalog:
         assert estimate({"services": "not-a-list"})["estimate"] == 0.0
 
 
-# ── Live API (Phase 8.4) ────────────────────────────────────────────────
-
+# Live API tests
 
 def _mock_retail_response(price: float) -> MagicMock:
     """A mock httpx response carrying one retail-price item."""
@@ -319,8 +317,7 @@ class TestAzureApi:
         assert result["estimate"] == 0.0
 
 
-# ── Live-pricing grounding (Phase 8.4 -> pipeline wiring) ────────────────
-
+# Live-pricing grounding tests
 
 class TestGrounding:
     def test_extract_services_finds_aliases(self) -> None:

@@ -1,55 +1,34 @@
-"""The 21 compliance rules — one immutable source of truth (Phase 8.1).
-
-These rules used to be hardcoded inside the compliance agent. They now live
-here so any module can import them, and they stay immutable:
-
-- ``COMPLIANCE_RULES`` is keyed by rule id and wrapped in
-  :class:`types.MappingProxyType`, so nothing can add, remove, or edit a rule
-  at runtime.
-- :func:`render_rules_text` produces the ``"01. Name — description"`` block
-  the compliance agent embeds in its system prompt, so the LLM sees the rules
-  explicitly (never by reference) — the Phase 10.2 AI-poisoning defense.
-- The agent's validation checks every ``rule_id`` against :data:`RULE_IDS`,
-  so a model can't invent, drop, or rewrite a rule.
-
-Coverage per BUILD_CHECKLIST Phase 8.1: residency, encryption, access control,
-audit logging, retention, incident response, vendor assessment, DR, network
-security, and identity.
-"""
+"""The 21 immutable compliance rules for regulatory auditing."""
 
 from __future__ import annotations
 
 from types import MappingProxyType
 from typing import Final
 
-# (id, name, description). A tuple, so the set of rules is fixed at import
-# time. Each entry is a plain dict kept private; the public views below are
-# read-only proxies.
 _COMPLIANCE_RULES: Final[tuple[tuple[str, str, str], ...]] = (
-    ("01", "Data Residency", "Customer data stored within approved geography"),
-    ("02", "Encryption at Rest", "All storage encrypted with AES-256"),
-    ("03", "Encryption in Transit", "TLS 1.2+ for all data in motion"),
-    ("04", "Access Control", "RBAC with least-privilege principle"),
-    ("05", "Audit Logging", "All access logged and monitored"),
-    ("06", "Data Retention", "Define and enforce retention policies"),
-    ("07", "Right to Deletion", "Users can request data deletion"),
-    ("08", "Breach Notification", "Notify authorities within 72 hours"),
-    ("09", "Incident Response", "Documented incident response plan"),
-    ("10", "Vendor Assessment", "Third-party vendors must meet standards"),
-    ("11", "Data Classification", "Classify data by sensitivity"),
-    ("12", "Backup & Recovery", "Regular backups with DR testing"),
-    ("13", "Business Continuity", "Documented BCP"),
-    ("14", "Network Security", "Segmentation, firewalls, DDoS protection"),
-    ("15", "Patch Management", "Regular security patching"),
-    ("16", "Identity Management", "MFA for all privileged access"),
-    ("17", "Key Management", "Managed HSM for encryption keys"),
-    ("18", "Secure Development", "SDLC with security reviews"),
-    ("19", "Vulnerability Scanning", "Regular scans with remediation SLAs"),
-    ("20", "Staff Training", "Security awareness training"),
-    ("21", "Third-party Data", "Agreements with data processors"),
+    ("01", "PDPL Art. 29 (Data Residency)", "Personal data stored within KSA approved geography"),
+    ("02", "GDPR Art. 32 (Encryption at Rest)", "All storage encrypted with AES-256 (Data at rest)"),
+    ("03", "PCI-DSS Req 4 (Encryption in Transit)", "TLS 1.2+ for all data in motion across public networks"),
+    ("04", "SOC 2 CC6.1 (Access Control)", "Logical access restricted via RBAC with least-privilege principle"),
+    ("05", "HIPAA 164.312(b) (Audit Logging)", "Hardware, software, and procedural mechanisms to record and examine access"),
+    ("06", "GDPR Art. 5(1)(e) (Data Retention)", "Define and enforce data retention policies (kept no longer than necessary)"),
+    ("07", "GDPR Art. 17 (Right to Deletion)", "Users can request personal data deletion (Right to be forgotten)"),
+    ("08", "GDPR Art. 33 (Breach Notification)", "Notify supervisory authorities within 72 hours of a breach"),
+    ("09", "SOC 2 CC7.3 (Incident Response)", "Documented incident response plan to evaluate, respond, and mitigate"),
+    ("10", "ISO 27001 A.15.1.1 (Vendor Assessment)", "Information security policy for supplier relationships must be agreed"),
+    ("11", "ISO 27001 A.8.2.1 (Data Classification)", "Information classified by legal requirements, value, criticality and sensitivity"),
+    ("12", "SOC 2 A1.2 (Backup & Recovery)", "Regular backups with Disaster Recovery testing (RTO/RPO objectives)"),
+    ("13", "ISO 27001 A.17.1.2 (Business Continuity)", "Documented Business Continuity Procedures (BCP) implemented and tested"),
+    ("14", "PCI-DSS Req 1 (Network Security)", "Install and maintain firewall configuration (Segmentation, DDoS protection)"),
+    ("15", "PCI-DSS Req 6.2 (Patch Management)", "Regular security patching; install critical patches within 30 days"),
+    ("16", "NIST CSF PR.AC-1 (Identity Management)", "MFA and managed identities enforced for all privileged access"),
+    ("17", "NIST CSF PR.DS-1 (Key Management)", "Cryptographic keys managed securely via Managed HSM or Key Vault"),
+    ("18", "ISO 27001 A.14.2.1 (Secure Development)", "Secure Software Development Life Cycle (SDLC) with security reviews"),
+    ("19", "PCI-DSS Req 11.2 (Vulnerability Scanning)", "Internal and external vulnerability scans at least quarterly"),
+    ("20", "HIPAA 164.308(a)(5) (Staff Training)", "Security awareness training program for all members of the workforce"),
+    ("21", "GDPR Art. 28 (Third-party Data)", "Processing by a processor shall be governed by a contract (DPA)"),
 )
 
-# Public immutable views — MappingProxyType raises TypeError on assignment.
 COMPLIANCE_RULES: Final[MappingProxyType[str, MappingProxyType[str, str]]] = (
     MappingProxyType(
         {
@@ -61,31 +40,17 @@ COMPLIANCE_RULES: Final[MappingProxyType[str, MappingProxyType[str, str]]] = (
     )
 )
 
-#: The exact set of valid rule ids — validation authority for the agent.
 RULE_IDS: Final[frozenset[str]] = frozenset(rule_id for rule_id, _, _ in _COMPLIANCE_RULES)
-
-#: Ordered list of the 21 rule names (for display and prompt rendering).
 RULE_NAMES: Final[tuple[str, ...]] = tuple(name for _, name, _ in _COMPLIANCE_RULES)
 
 
 def get_rule(rule_id: str) -> MappingProxyType[str, str] | None:
-    """Return the rule with ``rule_id`` (e.g. ``"05"``), or ``None``.
-
-    Args:
-        rule_id: Two-digit rule id from ``"01"`` to ``"21"``.
-
-    Returns:
-        A read-only ``{"id", "name", "description"}`` mapping, or ``None``.
-    """
+    """Return the rule with rule_id, or None."""
     return COMPLIANCE_RULES.get(rule_id)
 
 
 def render_rules_text() -> str:
-    """Render the 21 rules as the prompt block ``"01. Name — description"``.
-
-    Kept in the exact order of :data:`COMPLIANCE_RULES` so the numbering can
-    never drift from the ids.
-    """
+    """Render the 21 rules formatted for prompt injection."""
     return "\n".join(
         f"{rule_id}. {name} — {description}"
         for rule_id, name, description in _COMPLIANCE_RULES

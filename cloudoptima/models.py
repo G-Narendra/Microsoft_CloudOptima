@@ -1,20 +1,28 @@
-"""Data models and enumerations for CloudOptima.
-
-Provides type-safe Pydantic v2 domain models for agent interactions,
-architectural configurations, conflicts, artifacts, and multi-agent sessions.
-Automatically sanitizes all text input fields by stripping null bytes (\x00).
-"""
+"""Data models and enumerations for CloudOptima."""
 
 from __future__ import annotations
 
-import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
+import uuid
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-# ── Enumerations ─────────────────────────────────────────────────────────────
+
+# Enumerations
+
+class UserRole(StrEnum):
+    """Roles for local RBAC login simulation."""
+    VIEWER = "viewer"
+    REVIEWER = "reviewer"
+    ADMIN = "admin"
+
+
+class User(BaseModel):
+    """Represents an authenticated user in the local RBAC system."""
+    username: str
+    role: UserRole
 
 
 class AgentType(StrEnum):
@@ -28,7 +36,7 @@ class AgentType(StrEnum):
 
 
 class WorkloadType(StrEnum):
-    """How the workload hits the infrastructure (spiky, steady, continuous)."""
+    """Workload type patterns (realtime, batch, streaming, mixed)."""
 
     REALTIME = "realtime"
     BATCH = "batch"
@@ -37,7 +45,7 @@ class WorkloadType(StrEnum):
 
 
 class DeploymentScale(StrEnum):
-    """How big the deployment is — drives sizing and cost assumptions."""
+    """Deployment scale tiers."""
 
     SMALL = "small"
     MEDIUM = "medium"
@@ -46,7 +54,7 @@ class DeploymentScale(StrEnum):
 
 
 class AzureRegion(StrEnum):
-    """Regions we let users pick from (data residency matters for compliance)."""
+    """Supported Azure regions."""
 
     UAE_NORTH = "uaenorth"
     EAST_US = "eastus"
@@ -68,7 +76,7 @@ class AzureRegion(StrEnum):
 
 
 class ComplianceFramework(StrEnum):
-    """Regulatory frameworks the compliance agent can be asked to check."""
+    """Supported compliance and regulatory frameworks."""
 
     PDPL = "pdpl"
     HIPAA = "hipaa"
@@ -77,11 +85,10 @@ class ComplianceFramework(StrEnum):
     GDPR = "gdpr"
 
 
-# ── Base Model with Automatic Null Byte Sanitization ──────────────────────────
-
+# Base Model with Automatic Null Byte Sanitization
 
 def sanitize_null_bytes(val: Any) -> Any:
-    """Recursively remove null bytes (\x00) from strings inside dicts and lists."""
+    """Recursively remove null bytes from strings inside dicts and lists."""
     if isinstance(val, str):
         return val.replace("\x00", "")
     elif isinstance(val, dict):
@@ -92,11 +99,7 @@ def sanitize_null_bytes(val: Any) -> Any:
 
 
 class SanitizedBaseModel(BaseModel):
-    """Base Pydantic model that strips null bytes from all text fields automatically.
-
-    Extra fields are forbidden (``extra="forbid"``) so unexpected keys in LLM
-    output or user input fail validation instead of being silently accepted.
-    """
+    """Base Pydantic model that strips null bytes from all text fields automatically."""
 
     model_config = ConfigDict(
         use_enum_values=True,
@@ -114,27 +117,26 @@ class SanitizedBaseModel(BaseModel):
         return data
 
 
-# ── Domain Models ─────────────────────────────────────────────────────────────
-
+# Domain Models
 
 class AgentTurn(SanitizedBaseModel):
-    """One agent's contribution to a session — its output, timing, and token use."""
+    """Single agent turn output, execution timing, and token usage."""
 
     agent_type: AgentType = Field(description="The agent role performing this turn")
     output: dict[str, Any] = Field(
         default_factory=dict,
         description="Structured output dictionary produced by the agent",
     )
-    latency_ms: float = Field(default=0.0, ge=0.0, description="Wall-clock time the turn took")
+    latency_ms: float = Field(default=0.0, ge=0.0, description="Execution time in milliseconds")
     tokens_used: int = Field(default=0, ge=0, description="Tokens consumed by this turn")
     timestamp: datetime = Field(
         default_factory=lambda: datetime.now(UTC),
-        description="UTC timestamp of when the turn completed",
+        description="UTC timestamp of turn completion",
     )
 
 
 class Conflict(SanitizedBaseModel):
-    """Two agents disagreeing — what about, who's involved, and how it got resolved."""
+    """Conflict between agents and its arbitration resolution."""
 
     dimension: str = Field(
         default="",
@@ -143,8 +145,8 @@ class Conflict(SanitizedBaseModel):
     agents: list[AgentType] = Field(
         description="List of agents involved in the conflict (minimum 2)"
     )
-    issue: str = Field(description="What the agents disagree on")
-    resolution: str = Field(description="How the Judge settled it (empty until arbitration)")
+    issue: str = Field(description="Description of disagreement")
+    resolution: str = Field(description="Arbitration resolution from Judge agent")
 
     @field_validator("agents")
     @classmethod
@@ -156,26 +158,26 @@ class Conflict(SanitizedBaseModel):
 
 
 class Artifact(SanitizedBaseModel):
-    """A generated deliverable — Bicep template, cost report, or summary doc."""
+    """Generated deliverable (e.g. Bicep template, cost forecast, markdown report)."""
 
     artifact_id: str = Field(
         default_factory=lambda: str(uuid.uuid4()),
         description="Unique identifier for the artifact",
     )
-    name: str = Field(description="Filename of the artifact (e.g. architecture.bicep)")
+    name: str = Field(description="Filename of the artifact")
     type: str = Field(
         description="Artifact kind: iac_bicep, cost_forecast, compliance_report, etc."
     )
     format: str = Field(
         default="text",
-        description="Content format for syntax highlighting: bicep, json, markdown",
+        description="Content format: bicep, json, markdown",
     )
     content: str = Field(description="Raw text content of the generated artifact")
     description: str = Field(default="", description="Summary description of the artifact")
 
 
 class Session(SanitizedBaseModel):
-    """Everything about one analysis: the user's inputs and everything the pipeline produced."""
+    """Session state encompassing user input, agent turns, conflicts, and artifacts."""
 
     session_id: str = Field(
         default_factory=lambda: str(uuid.uuid4()),
@@ -186,37 +188,41 @@ class Session(SanitizedBaseModel):
         default=WorkloadType.MIXED, description="Kind of workload being designed for"
     )
     scale: DeploymentScale = Field(
-        default=DeploymentScale.MEDIUM, description="How big the deployment is"
+        default=DeploymentScale.MEDIUM, description="Deployment scale"
     )
     region: AzureRegion = Field(
-        default=AzureRegion.UAE_NORTH, description="Primary Azure region to target"
+        default=AzureRegion.UAE_NORTH, description="Target Azure region"
     )
     compliance_frameworks: list[ComplianceFramework] = Field(
-        default_factory=list, description="Regulations to check against"
+        default_factory=list, description="Target compliance frameworks"
     )
     budget: float | None = Field(
         default=None,
-        description="Monthly budget in USD — None means the user didn't set a cap",
+        description="Monthly budget in USD (None for unconstrained)",
     )
     services: str = Field(
-        default="", description="Services/stack the user described (free text)"
+        default="", description="User-requested services"
     )
     status: str = Field(
-        default="pending", description="Lifecycle: pending, running, completed, failed"
+        default="pending", description="Lifecycle: pending, running, pending_approval, completed, failed"
+    )
+    hitl_approved: bool = Field(
+        default=False, description="Whether design has been approved prior to artifact generation"
     )
     error_message: str = Field(
         default="",
-        description="Human-readable failure or rate-limit reason (empty on success)",
+        description="Error or rate-limit message if failed",
     )
-    user_prompt: str = Field(default="", description="The user's requirements text")
+    user_prompt: str = Field(default="", description="Requirements prompt")
+    on_token: Any = Field(default=None, exclude=True, description="Streaming callback hook")
     agent_turns: list[AgentTurn] = Field(
         default_factory=list, description="Agent turns in pipeline order"
     )
     conflicts: list[Conflict] = Field(
-        default_factory=list, description="Disagreements found (and their resolutions)"
+        default_factory=list, description="Detected conflicts and resolutions"
     )
     artifacts: list[Artifact] = Field(
-        default_factory=list, description="Generated deliverables"
+        default_factory=list, description="Generated artifacts"
     )
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC),

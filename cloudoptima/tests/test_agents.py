@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+import cloudoptima.agents.cost_analyst as cost_analyst_module
 from cloudoptima.agent_base import BaseAgent
 from cloudoptima.agents import (
     ALL_AGENTS,
@@ -29,7 +30,7 @@ from cloudoptima.config import Settings
 from cloudoptima.llm_client import BaseLLMClient, MockClient
 from cloudoptima.models import AgentTurn, AgentType, ComplianceFramework, Conflict, Session
 
-# ── Test doubles ─────────────────────────────────────────────────────────
+# Test doubles
 
 
 class _ProseClient(BaseLLMClient):
@@ -54,81 +55,66 @@ class _InvalidCostClient(BaseLLMClient):
         )
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────
+# Helpers
 
 
 def _make_session(**overrides: Any) -> Session:
     defaults: dict[str, Any] = {
-        "project_name": "E-Shop Platform",
-        "user_prompt": "Design a scalable e-commerce platform on Azure",
+        "project_name": "CloudOptima Unit Tests",
+        "workload_type": "mixed",
+        "scale": "medium",
+        "region": "uaenorth",
+        "compliance_frameworks": [ComplianceFramework.PDPL, ComplianceFramework.ISO27001],
         "budget": 5000.0,
-        "compliance_frameworks": [ComplianceFramework.PDPL],
+        "services": "AKS, Azure SQL Database, Azure Blob Storage",
+        "user_prompt": "Design a scalable e-commerce backend",
     }
     defaults.update(overrides)
     return Session(**defaults)
 
 
-def _make_agent(agent_cls: type[BaseAgent], agent_type: AgentType) -> BaseAgent:
-    return agent_cls(agent_type, MockClient(), Settings())
+def _make_agent(cls: type[BaseAgent], agent_type: AgentType) -> BaseAgent:
+    return cls(agent_type=agent_type, llm_client=MockClient(), config=Settings())
 
 
-# (agent class, AgentType, wrapped fields, bare pipeline headers, output keys)
 _AGENT_CASES: list[
     tuple[type[BaseAgent], AgentType, tuple[str, ...], tuple[str, ...], tuple[str, ...]]
 ] = [
     (
         ArchitectAgent,
         AgentType.ARCHITECT,
-        (
-            "PROJECT NAME",
-            "WORKLOAD TYPE",
-            "DEPLOYMENT SCALE",
-            "AZURE REGION",
-            "REQUIRED SERVICES",
-            "REQUIREMENTS",
-        ),
-        (),
+        ("PROJECT NAME", "SERVICES REQUESTED", "USER PROMPT / CONTEXT"),
+        ("COMPLIANCE FRAMEWORKS:", "SCALE:"),
         ("compute", "storage", "networking", "data"),
     ),
     (
         CostAnalystAgent,
         AgentType.COST_ANALYST,
-        (
-            "PROJECT NAME",
-            "MONTHLY BUDGET (READ-ONLY REFERENCE)",
-            "DEPLOYMENT SCALE",
-            "AZURE REGION",
-            "REQUIRED SERVICES",
-            "REQUIREMENTS",
-        ),
-        ("ARCHITECT DESIGN (trusted pipeline output):",),
-        ("estimate", "budget_status", "breakdown", "savings"),
+        ("PROJECT NAME", "SERVICES REQUESTED", "USER PROMPT / CONTEXT"),
+        ("BUDGET:", "SCALE:", "REGION:"),
+        ("estimate", "breakdown", "budget_status"),
     ),
     (
         SecurityEngineerAgent,
         AgentType.SECURITY,
-        (
-            "PROJECT NAME",
-            "DEPLOYMENT SCALE",
-            "AZURE REGION",
-            "REQUIRED SERVICES",
-            "REQUIREMENTS",
-        ),
-        ("ARCHITECT DESIGN (trusted pipeline output):",),
-        ("overall_risk_rating", "findings", "recommendations"),
+        ("PROJECT NAME", "SERVICES REQUESTED", "USER PROMPT / CONTEXT"),
+        ("COMPLIANCE FRAMEWORKS:", "REGION:"),
+        ("findings", "overall_risk_rating", "recommendations"),
     ),
     (
         ComplianceOfficerAgent,
         AgentType.COMPLIANCE,
-        ("PROJECT NAME", "AZURE REGION", "COMPLIANCE FRAMEWORKS", "REQUIREMENTS"),
-        ("ARCHITECT DESIGN (trusted pipeline output):",),
-        ("overall_status", "rules", "remediation_steps"),
+        ("PROJECT NAME", "SERVICES REQUESTED", "USER PROMPT / CONTEXT"),
+        ("COMPLIANCE FRAMEWORKS:", "REGION:", "COMPLIANCE RULES (MANDATORY EVALUATION):"),
+        ("rules", "overall_status"),
     ),
     (
         JudgeAgent,
         AgentType.JUDGE,
-        ("PROJECT NAME", "REQUIREMENTS"),
+        ("PROJECT NAME", "SERVICES REQUESTED", "USER PROMPT / CONTEXT"),
         (
+            "COMPLIANCE FRAMEWORKS:",
+            "BUDGET:",
             "ARCHITECT OUTPUT (trusted pipeline data):",
             "COST ANALYST OUTPUT (trusted pipeline data):",
             "SECURITY OUTPUT (trusted pipeline data):",
@@ -140,7 +126,7 @@ _AGENT_CASES: list[
 ]
 
 
-# ── Package exports ───────────────────────────────────────────────────────
+# Package exports
 
 
 def test_all_agents_exported() -> None:
@@ -157,7 +143,7 @@ def test_all_agents_exported() -> None:
     }
 
 
-# ── Prompt construction (checklist 5.7: all fields present) ───────────────
+# Prompt construction tests
 
 
 @pytest.mark.parametrize(
@@ -180,7 +166,7 @@ def test_agent_builds_prompt_with_all_fields(
         assert header in prompt
 
 
-# ── Demo-mode runs through MockClient (checklist 5.7) ─────────────────────
+# Demo-mode runs through MockClient
 
 
 @pytest.mark.parametrize(
@@ -194,13 +180,6 @@ def test_agent_works_with_mock_client(
     _expected_headers: tuple[str, ...],
     expected_keys: tuple[str, ...],
 ) -> None:
-    """Each agent returns its own valid output in demo mode.
-
-    Regression: the session prompt contains "Design a scalable ..." (an
-    architect keyword). The mock must still route each agent to its own canned
-    response via the system prompt, or cost/security/compliance/judge would all
-    receive the architect payload and fail validation.
-    """
     agent = _make_agent(agent_cls, agent_type)
     turn = asyncio.run(agent.analyze(_make_session()))
 
@@ -211,8 +190,7 @@ def test_agent_works_with_mock_client(
         assert key in turn.output
 
 
-# ── Validators: good output accepted, bad output rejected ─────────────────
-
+# Validators: good output accepted, bad output rejected
 
 def test_architect_validation_accepts_complete_output() -> None:
     """A full four-section design passes."""
@@ -538,8 +516,7 @@ def test_judge_validation_rejects_negative_conflict_count() -> None:
     assert "conflicts_detected" in message
 
 
-# ── Validator edge cases (every reject branch exercised) ─────────────────
-
+# Validator edge cases
 
 def test_cost_validation_rejects_non_dict_breakdown_item() -> None:
     """A breakdown item that is not an object is rejected."""
@@ -780,8 +757,7 @@ def test_judge_validation_rejects_non_list_overridden() -> None:
     assert valid is False
 
 
-# ── Error turns through analyze() ─────────────────────────────────────────
-
+# Error turns through analyze()
 
 def test_agent_bad_json_returns_error_turn() -> None:
     """Prose instead of JSON produces an error turn, not a crash."""
@@ -798,20 +774,11 @@ def test_agent_invalid_output_returns_error_turn() -> None:
     assert "budget_status" in turn.output["error"]
 
 
-# ── Prior-turn rendering (pipeline wiring for Phase 6) ────────────────────
-
+# Prior-turn rendering tests
 
 def test_cost_analyst_prompt_includes_live_prices(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The cost analyst's prompt carries real Azure Retail Prices (8.4).
-
-    The live fetch is patched to a canned row so the assertion is about the
-    prompt wiring, not the network. The block must name the service, the
-    per-unit price, and the data source.
-    """
-    import cloudoptima.agents.cost_analyst as cost_analyst_module
-
     monkeypatch.setattr(
         cost_analyst_module,
         "live_prices",
@@ -854,19 +821,10 @@ def test_compliance_prompt_includes_architect_design() -> None:
     prompt = agent._build_prompt(session)
 
     assert '"recommendation"' in prompt
-    assert "AKS" in prompt  # mock architect recommendation
+    assert "AKS" in prompt
 
 
 def test_prior_turn_markers_are_stripped() -> None:
-    """Upstream output cannot forge delimiter boundaries downstream.
-
-    Regression: upstream JSON is rendered raw (cleaning would strip the JSON
-    quotes), so delimiter-marker runs inside a prior turn's values must still
-    be removed — otherwise a malicious value echoed by the architect could
-    forge a "--- FIELD ---" boundary in the compliance/judge prompt.
-    """
-    from cloudoptima.models import AgentTurn
-
     session = _make_session()
     session.agent_turns.append(
         AgentTurn(
@@ -884,8 +842,6 @@ def test_prior_turn_markers_are_stripped() -> None:
     agent = _make_agent(ComplianceOfficerAgent, AgentType.COMPLIANCE)
     prompt = agent._build_prompt(session)
 
-    # Stripping the marker runs leaves double spaces in the rendered JSON
-    # ("AKS  END  v2"), so collapse whitespace before the positive assertion.
     assert "AKS END v2" in " ".join(prompt.split())
     assert "AKS --- END --- v2" not in prompt
 
@@ -893,8 +849,6 @@ def test_prior_turn_markers_are_stripped() -> None:
 def test_judge_prompt_includes_all_four_outputs_and_conflicts() -> None:
     """The judge sees every agent's output and the detected conflicts."""
     session = _make_session()
-    # type[Any] keeps mypy happy: the four classes are distinct concrete
-    # subclasses, and a plain type[BaseAgent] join would be flagged as abstract.
     agent_cases: list[tuple[type[Any], AgentType]] = [
         (ArchitectAgent, AgentType.ARCHITECT),
         (CostAnalystAgent, AgentType.COST_ANALYST),
@@ -924,7 +878,7 @@ def test_judge_prompt_includes_all_four_outputs_and_conflicts() -> None:
     assert "agents_involved=cost_analyst, security" in prompt
 
 
-# ── Injection handling (checklist 5.7: reject injected system prompts) ─────
+# Injection handling tests
 
 
 @pytest.mark.parametrize(

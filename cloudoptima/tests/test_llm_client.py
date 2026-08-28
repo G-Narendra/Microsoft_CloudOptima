@@ -16,20 +16,18 @@ from cloudoptima.llm_client import (
     BaseLLMClient,
     GoogleClient,
     MockClient,
-    NvidiaClient,
     OpenAIClient,
     _strip_control_chars,
     create_llm_client,
     generate_with_retry,
 )
 
-# ── MockClient Tests ─────────────────────────────────────────────────────────
-
+# MockClient tests
 
 def test_mock_client_architect() -> None:
     """MockClient returns valid architect JSON with expected keys."""
     client = MockClient()
-    response = client.generate("Design a compute architecture", "You are an architect")
+    response = "".join("".join(client.generate("Design a compute architecture", "You are an architect")))
     data = json.loads(response)
     assert "compute" in data
     assert "storage" in data
@@ -41,7 +39,7 @@ def test_mock_client_architect() -> None:
 def test_mock_client_cost() -> None:
     """MockClient returns valid cost analyst JSON with expected keys."""
     client = MockClient()
-    response = client.generate("Estimate the monthly cost and budget")
+    response = "".join("".join(client.generate("Estimate the monthly cost and budget")))
     data = json.loads(response)
     assert "estimate" in data
     assert "breakdown" in data
@@ -52,7 +50,7 @@ def test_mock_client_cost() -> None:
 def test_mock_client_security() -> None:
     """MockClient returns valid security JSON with expected keys."""
     client = MockClient()
-    response = client.generate("Analyze security vulnerabilities and risk")
+    response = "".join("".join(client.generate("Analyze security vulnerabilities and risk")))
     data = json.loads(response)
     assert "findings" in data
     assert "overall_risk_rating" in data
@@ -63,7 +61,7 @@ def test_mock_client_security() -> None:
 def test_mock_client_compliance() -> None:
     """MockClient returns valid compliance JSON with expected keys."""
     client = MockClient()
-    response = client.generate("Check compliance with PDPL regulations")
+    response = "".join("".join(client.generate("Check compliance with PDPL regulations")))
     data = json.loads(response)
     assert "rules" in data
     assert "overall_status" in data
@@ -73,15 +71,14 @@ def test_mock_client_compliance() -> None:
 def test_mock_client_judge() -> None:
     """MockClient returns valid judge JSON with expected keys."""
     client = MockClient()
-    response = client.generate("Judge the conflicts and arbitrate between agents")
+    response = "".join("".join(client.generate("Judge the conflicts and arbitrate between agents")))
     data = json.loads(response)
     assert "arbitration" in data
     assert "final_recommendation" in data
     assert "overridden_agents" in data
 
 
-# ── Factory Tests ─────────────────────────────────────────────────────────────
-
+# Factory tests
 
 def test_factory_mock() -> None:
     """Factory creates MockClient when provider is 'mock'."""
@@ -99,8 +96,7 @@ def test_factory_invalid() -> None:
         create_llm_client(settings)
 
 
-# ── Control Character Stripping ───────────────────────────────────────────────
-
+# Control Character Stripping tests
 
 def test_control_chars_stripped() -> None:
     """Control characters, ANSI codes, and null bytes are stripped."""
@@ -112,8 +108,7 @@ def test_control_chars_stripped() -> None:
     assert "\x07" not in clean
 
 
-# ── Retry Wrapper Tests ───────────────────────────────────────────────────────
-
+# Retry Wrapper tests
 
 def test_retry_success_on_second_attempt() -> None:
     """Retry wrapper recovers after first failure."""
@@ -123,9 +118,9 @@ def test_retry_success_on_second_attempt() -> None:
         '{"result": "success"}',
     ]
 
-    result = generate_with_retry(
+    result = "".join(generate_with_retry(
         mock_client, "test prompt", max_retries=3, base_delay=0.01
-    )
+    ))
     assert result == '{"result": "success"}'
     assert mock_client.generate.call_count == 2
 
@@ -136,69 +131,13 @@ def test_retry_exhausted() -> None:
     mock_client.generate.side_effect = httpx.TimeoutException("timeout")
 
     with pytest.raises(httpx.TimeoutException):
-        generate_with_retry(
+        list(generate_with_retry(
             mock_client, "test prompt", max_retries=3, base_delay=0.01
-        )
+        ))
     assert mock_client.generate.call_count == 3
 
 
-# ── NvidiaClient Tests ────────────────────────────────────────────────────────
-
-
-def test_nvidia_client_missing_key() -> None:
-    """NvidiaClient raises ValueError when API key is empty."""
-    settings = Settings(llm_provider="mock", nvidia_api_key=SecretStr(""))
-    with pytest.raises(ValueError, match="nvidia_api_key is required"):
-        NvidiaClient(settings)
-
-
-def test_nvidia_client_generate() -> None:
-    """NvidiaClient.generate() sends correct request and returns content."""
-    settings = Settings(llm_provider="mock", nvidia_api_key=SecretStr("nvapi-test-key-123"))
-    client = NvidiaClient(settings)
-
-    mock_response_data = {
-        "choices": [{"message": {"content": '{"result": "nvidia_ok"}'}}]
-    }
-
-    with patch("cloudoptima.llm_client.httpx.Client") as mock_httpx:
-        mock_http_client = MagicMock()
-        mock_httpx.return_value.__enter__ = MagicMock(return_value=mock_http_client)
-        mock_httpx.return_value.__exit__ = MagicMock(return_value=False)
-
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = mock_response_data
-        mock_http_client.post.return_value = mock_resp
-
-        result = client.generate("test prompt", "system prompt")
-
-    assert result == '{"result": "nvidia_ok"}'
-
-
-def test_nvidia_client_empty_response() -> None:
-    """NvidiaClient returns empty string when response content is empty."""
-    settings = Settings(llm_provider="mock", nvidia_api_key=SecretStr("nvapi-test-key-123"))
-    client = NvidiaClient(settings)
-
-    mock_response_data = {
-        "choices": [{"message": {"content": ""}}]
-    }
-
-    with patch("cloudoptima.llm_client.httpx.Client") as mock_httpx:
-        mock_http_client = MagicMock()
-        mock_httpx.return_value.__enter__ = MagicMock(return_value=mock_http_client)
-        mock_httpx.return_value.__exit__ = MagicMock(return_value=False)
-
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = mock_response_data
-        mock_http_client.post.return_value = mock_resp
-
-        result = client.generate("test prompt")
-
-    assert result == ""
-
-
-# ── AzureClient Tests ─────────────────────────────────────────────────────────
+# AzureClient tests
 
 
 def test_azure_client_missing_key() -> None:
@@ -235,17 +174,17 @@ def test_azure_client_generate() -> None:
         mock_openai_instance = MagicMock()
         mock_openai_cls.return_value = mock_openai_instance
 
-        # Build mock response
-        mock_message = MagicMock()
-        mock_message.content = '{"result": "azure_ok"}'
+        # Build mock response for streaming
+        mock_delta = MagicMock()
+        mock_delta.content = '{"result": "azure_ok"}'
         mock_choice = MagicMock()
-        mock_choice.message = mock_message
-        mock_completion = MagicMock()
-        mock_completion.choices = [mock_choice]
-        mock_openai_instance.chat.completions.create.return_value = mock_completion
+        mock_choice.delta = mock_delta
+        mock_chunk = MagicMock()
+        mock_chunk.choices = [mock_choice]
+        mock_openai_instance.chat.completions.create.return_value = [mock_chunk]
 
         client = AzureClient(settings)
-        result = client.generate("test prompt", "system prompt")
+        result = "".join("".join(client.generate("test prompt", "system prompt")))
 
     assert result == '{"result": "azure_ok"}'
 
@@ -271,13 +210,12 @@ def test_azure_client_empty_response() -> None:
         mock_openai_instance.chat.completions.create.return_value = mock_completion
 
         client = AzureClient(settings)
-        result = client.generate("test prompt")
+        result = "".join("".join(client.generate("test prompt")))
 
     assert result == ""
 
 
-# ── OpenAI (direct) Client Tests ────────────────────────────────────────────
-
+# OpenAI client tests
 
 def test_openai_client_missing_key() -> None:
     """OpenAIClient raises ValueError when API key is empty."""
@@ -294,16 +232,16 @@ def test_openai_client_generate() -> None:
         mock_openai_instance = MagicMock()
         mock_openai_cls.return_value = mock_openai_instance
 
-        mock_message = MagicMock()
-        mock_message.content = '{"result": "openai_ok"}'
+        mock_delta = MagicMock()
+        mock_delta.content = '{"result": "openai_ok"}'
         mock_choice = MagicMock()
-        mock_choice.message = mock_message
-        mock_completion = MagicMock()
-        mock_completion.choices = [mock_choice]
-        mock_openai_instance.chat.completions.create.return_value = mock_completion
+        mock_choice.delta = mock_delta
+        mock_chunk = MagicMock()
+        mock_chunk.choices = [mock_choice]
+        mock_openai_instance.chat.completions.create.return_value = [mock_chunk]
 
         client = OpenAIClient(settings)
-        result = client.generate("test prompt", "system prompt")
+        result = "".join("".join(client.generate("test prompt", "system prompt")))
 
         call_args = mock_openai_instance.chat.completions.create.call_args
         assert call_args.kwargs.get("response_format") == {"type": "json_object"}
@@ -327,7 +265,7 @@ def test_openai_client_uses_json_mode_without_system_prompt() -> None:
         mock_openai_instance.chat.completions.create.return_value = mock_completion
 
         client = OpenAIClient(settings)
-        client.generate("test prompt")  # no system_prompt
+        "".join("".join(client.generate("test prompt")))
 
         call_args = mock_openai_instance.chat.completions.create.call_args
         messages = call_args.kwargs.get("messages")
@@ -335,8 +273,7 @@ def test_openai_client_uses_json_mode_without_system_prompt() -> None:
         assert "JSON" in messages[0]["content"]
 
 
-# ── Anthropic Client Tests ───────────────────────────────────────────────────
-
+# Anthropic Client tests
 
 def test_anthropic_client_missing_key() -> None:
     settings = Settings(llm_provider="mock", anthropic_api_key=SecretStr(""))
@@ -362,7 +299,7 @@ def test_anthropic_client_generate() -> None:
         mock_resp.json.return_value = mock_response_data
         mock_http_client.post.return_value = mock_resp
 
-        result = client.generate("test prompt", "system prompt")
+        result = "".join("".join(client.generate("test prompt", "system prompt")))
 
     assert result == '{"result": "anthropic_ok"}'
     assert client.last_tokens_used == 42
@@ -380,13 +317,12 @@ def test_anthropic_client_empty_response() -> None:
         mock_resp.json.return_value = {"content": [{"type": "text", "text": ""}]}
         mock_http_client.post.return_value = mock_resp
 
-        result = client.generate("test prompt")
+        result = "".join("".join(client.generate("test prompt")))
 
     assert result == ""
 
 
-# ── Google Gemini Client Tests ───────────────────────────────────────────────
-
+# Google Gemini Client tests
 
 def test_google_client_missing_key() -> None:
     settings = Settings(llm_provider="mock", google_api_key=SecretStr(""))
@@ -412,7 +348,7 @@ def test_google_client_generate() -> None:
         mock_resp.json.return_value = mock_response_data
         mock_http_client.post.return_value = mock_resp
 
-        result = client.generate("test prompt", "system prompt")
+        result = "".join("".join(client.generate("test prompt", "system prompt")))
 
     assert result == '{"result": "google_ok"}'
     assert client.last_tokens_used == 77
@@ -431,13 +367,13 @@ def test_google_client_uses_header_not_url_key() -> None:
         mock_resp.json.return_value = {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}
         mock_http_client.post.return_value = mock_resp
 
-        client.generate("test prompt")
+        "".join("".join(client.generate("test prompt")))
 
     called_url = mock_http_client.post.call_args[0][0]
     assert "key=" not in called_url
 
 
-# ── Factory with new providers ───────────────────────────────────────────────
+# Factory with provider tests
 
 
 def test_factory_openai() -> None:
@@ -470,16 +406,17 @@ def test_azure_client_no_system_prompt() -> None:
         mock_openai_instance = MagicMock()
         mock_openai_cls.return_value = mock_openai_instance
 
-        mock_message = MagicMock()
-        mock_message.content = '{"result": "default_sys"}'
+        # Build mock response for streaming
+        mock_delta = MagicMock()
+        mock_delta.content = '{"result": "default_sys"}'
         mock_choice = MagicMock()
-        mock_choice.message = mock_message
-        mock_completion = MagicMock()
-        mock_completion.choices = [mock_choice]
-        mock_openai_instance.chat.completions.create.return_value = mock_completion
+        mock_choice.delta = mock_delta
+        mock_chunk = MagicMock()
+        mock_chunk.choices = [mock_choice]
+        mock_openai_instance.chat.completions.create.return_value = [mock_chunk]
 
         client = AzureClient(settings)
-        result = client.generate("test prompt")  # no system_prompt
+        result = "".join("".join(client.generate("test prompt")))  # no system_prompt
 
         # Verify the default system prompt was used
         call_args = mock_openai_instance.chat.completions.create.call_args

@@ -1,13 +1,4 @@
-"""CostAnalystAgent — prices the design and checks it against the budget.
-
-The cost analyst reads the architect's design (from ``session.agent_turns``)
-and the user's budget, then returns a numeric estimate with a line-item
-breakdown, a budget status (UNDER/NEAR/OVER), and concrete savings ideas.
-
-The budget is a **read-only reference**: it's rendered into the prompt so the
-model can judge against it, and validation never lets output rewrite the
-session budget.
-"""
+"""CostAnalystAgent — prices the design and checks it against the budget."""
 
 from __future__ import annotations
 
@@ -23,38 +14,43 @@ from cloudoptima.pricing import (
     render_price_block,
 )
 
-# The only budget statuses the model may report.
 _BUDGET_STATUSES: frozenset[str] = frozenset({"UNDER", "NEAR", "OVER"})
-
-# Phase 10.2: the cost analyst's contract is exactly these keys. Prices are
-# STATIC by design — the model may only name services from the immutable
-# KNOWN_AZURE_SERVICES catalog, so it can never inject invented line items.
 _ALLOWED_KEYS: Final[frozenset[str]] = frozenset(
     {"estimate", "currency", "breakdown", "budget_status", "savings"}
 )
 _ALLOWED_ITEM_KEYS: Final[frozenset[str]] = frozenset({"service", "cost", "notes"})
 
-_COST_SYSTEM_PROMPT = """\
-You are a cloud cost analyst specializing in Azure FinOps. Estimate the monthly
-cost of the proposed architecture and compare it against the user's budget. The
-budget is a READ-ONLY reference — you may read it and judge against it, but you
-must never modify it or invent a new one.
-
-The prompt carries a LIVE AZURE RETAIL PRICES block with real per-unit prices
-from the Azure Retail Prices API. Prefer those numbers over your training-data
-estimates when pricing line items, and scale them by the quantities the design
-implies. If the block says no live prices were fetched, fall back to your own
-Azure pricing knowledge.
-
-Return ONLY valid JSON with exactly this structure — no prose outside the JSON:
-
-{
+_ROLE = "You are a cloud cost analyst specializing in Azure FinOps."
+_CAPABILITIES = (
+    "Estimate the monthly cost of the proposed architecture and compare it against the user's budget. "
+    "The prompt carries a LIVE AZURE RETAIL PRICES block with real per-unit prices from the Azure Retail Prices API. "
+    "Prefer those numbers over your training-data estimates when pricing line items, and scale them by the quantities the design implies. "
+    "If the block says no live prices were fetched, fall back to your own Azure pricing knowledge."
+)
+_CONSTRAINTS = (
+    "The budget is a READ-ONLY reference — you may read it and judge against it, but you must never modify it or invent a new one. "
+    "Return ONLY valid JSON with exactly the required structure — no prose outside the JSON."
+)
+_OUTPUT_SCHEMA = """{
   "estimate": 0.0,
   "currency": "USD",
   "breakdown": [{"service": "string", "cost": 0.0, "notes": "string"}],
   "budget_status": "UNDER" or "NEAR" or "OVER",
   "savings": ["string", "..."]
-}
+}"""
+
+_COST_SYSTEM_PROMPT = f"""
+# ROLE
+{_ROLE}
+
+# CAPABILITIES
+{_CAPABILITIES}
+
+# CONSTRAINTS
+{_CONSTRAINTS}
+
+# OUTPUT SCHEMA
+{_OUTPUT_SCHEMA}
 """
 
 

@@ -1,23 +1,4 @@
-"""Tool registry (issue #7) — the deterministic tool layer agents can call.
-
-Tools are plain Python functions (no LLM in the loop) wrapping existing
-modules: live pricing, compliance lookup, and region listing. Every tool
-output is treated as **untrusted** — it is serialized, cleaned, and
-injection-scanned before it can reach a prompt or the UI (the same rule the
-RAG module applies to retrieved passages).
-
-Execution order inside :meth:`ToolRegistry.call`:
-
-1. **Governance** — :func:`cloudoptima.governance.enforce_action` checks the
-   tool's action type against the policy (fail closed).
-2. **Run** — the tool function executes (read-only lookups only today).
-3. **Sanitize** — the output is scanned with :func:`scan_llm_output` and
-   :func:`detect_injection`; a flagged result is withheld, never returned.
-
-The registry is the in-process backend. :mod:`cloudoptima.mcp_server` exposes
-the same tools over the Model Context Protocol, and
-:mod:`cloudoptima.mcp_bridge` picks between the two transports.
-"""
+"""Tool registry providing deterministic tool execution for agents."""
 
 from __future__ import annotations
 
@@ -28,20 +9,20 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Final
 
+from cloudoptima.compliance.rag import ComplianceRAG
 from cloudoptima.config import Settings
 from cloudoptima.governance import enforce_action
+from cloudoptima.models import AzureRegion
+from cloudoptima.pricing.azure_api import get_price_with_unit
+from cloudoptima.pricing.static_db import lookup
 from cloudoptima.sanitize import clean_output, detect_injection, scan_llm_output
 
 _logger = logging.getLogger(__name__)
 
-#: Tools must answer within this many seconds or the call fails. The LLM
-#: clients have timeouts; the tools need the same guarantee — a hung pricing
-#: API call or slow RAG query must never block the pipeline indefinitely
-#: (external principal-engineer review finding).
+# Execution timeout in seconds for tools
 TOOL_TIMEOUT_SECONDS: Final[float] = 15.0
 
-#: Parameter type checks used to validate tool arguments against the declared
-#: schema before execution (booleans are deliberately excluded from "number").
+# Parameter type checks used to validate tool arguments against schemas
 _TYPE_CHECKS: Final[dict[str, Callable[[Any], bool]]] = {
     "string": lambda v: isinstance(v, str),
     "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
@@ -52,16 +33,7 @@ _TYPE_CHECKS: Final[dict[str, Callable[[Any], bool]]] = {
 
 @dataclass(frozen=True)
 class ToolSpec:
-    """Metadata + callable for one registered tool.
-
-    Attributes:
-        name:        Unique tool name (also the action type for governance).
-        description: What the tool does, shown to models and in listings.
-        parameters:  JSON-schema-ish parameter map: name ->
-            ``{\"type\": ..., \"required\": bool, \"default\": ..., \"description\": ...}``.
-        action_type: The governance action type (defaults to ``name``).
-        func:        The callable implementing the tool.
-    """
+    """Metadata and callable for a registered tool."""
 
     name: str
     description: str
@@ -71,7 +43,7 @@ class ToolSpec:
 
     @property
     def governance_type(self) -> str:
-        """The action type used for policy checks (defaults to the tool name)."""
+        """The action type used for policy checks."""
         return self.action_type or self.name
 
 
@@ -82,8 +54,6 @@ class ToolRegistry:
         self._tools: dict[str, ToolSpec] = {}
         self._lock = threading.Lock()
 
-    # ── Registration ────────────────────────────────────────────────
-
     def register(
         self,
         name: str,
@@ -92,11 +62,7 @@ class ToolRegistry:
         parameters: dict[str, Any] | None = None,
         action_type: str = "",
     ) -> ToolSpec:
-        """Register a tool; replacing an existing name is an error.
-
-        Raises:
-            ValueError: If ``name`` is already registered.
-        """
+        """Register a tool in the registry."""
         with self._lock:
             if name in self._tools:
                 raise ValueError(f"tool already registered: {name}")
@@ -111,46 +77,29 @@ class ToolRegistry:
             return spec
 
     def list_tools(self) -> list[ToolSpec]:
-        """All registered tools in registration order."""
+        """Return all registered tools in registration order."""
         with self._lock:
             return list(self._tools.values())
 
     def get(self, name: str) -> ToolSpec | None:
-        """Return a tool spec by name, or ``None`` when unknown."""
+        """Return a tool spec by name, or None when unknown."""
         with self._lock:
             return self._tools.get(name)
-
-    # ── Execution ───────────────────────────────────────────────────
 
     def call(
         self,
         name: str,
         args: dict[str, Any] | None = None,
         settings: Settings | None = None,
+        logger: Any = None,
     ) -> dict[str, Any]:
-        """Execute one tool with governance + output sanitization.
-
-        Never raises: every failure path returns ``{\"ok\": False, ...}`` so the
-        caller (orchestrator, dashboard, MCP server) can degrade gracefully.
-
-        Args:
-            name:     Tool name.
-            args:     Keyword arguments for the tool.
-            settings: App settings (governance + feature toggles).
-
-        Returns:
-            ``{\"ok\": True, \"tool\": name, \"result\": <value>, \"source\": \"registry\"}``
-            on success, or ``{\"ok\": False, \"tool\": name, \"error\": ...}`` when
-            the tool is unknown, the policy denies it, it raises, or its
-            output was withheld as suspicious.
-        """
+        """Execute a tool with governance checks and output sanitization."""
         spec = self.get(name)
         if spec is None:
             return {"ok": False, "tool": name, "error": f"unknown tool: {name}", "result": None}
 
-        #        # Governance first — a denied action never reaches the tool.
         try:
-            enforce_action({"type": spec.governance_type, "params": args or {}}, settings)
+            enforce_action({"type": spec.governance_type, "params": args or {}}, settings, logger)
         except Exception as exc:
             return {
                 "ok": False,
@@ -159,10 +108,6 @@ class ToolRegistry:
                 "result": None,
             }
 
-        # Validate the arguments against the tool's declared parameter schema
-        # BEFORE execution: a model passing {"service": 42} must be rejected at
-        # the schema layer, not explode inside the tool function (external
-        # principal-engineer review finding).
         effective_args, arg_error = self._validate_args(spec, args or {})
         if arg_error is not None:
             return {
@@ -183,11 +128,9 @@ class ToolRegistry:
             _logger.warning("Tool %r raised: %s", name, exc)
             return {"ok": False, "tool": name, "error": f"tool failed: {exc}", "result": None}
 
-
-        # Tool output is untrusted: serialize, clean, scan, withhold on flags.
         try:
             text = json.dumps(result, ensure_ascii=False, default=str)
-        except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
+        except (TypeError, ValueError) as exc:
             return {
                 "ok": False,
                 "tool": name,
@@ -212,28 +155,15 @@ class ToolRegistry:
         cleaned_text = clean_output(text)
         try:
             cleaned: Any = json.loads(cleaned_text)
-        except json.JSONDecodeError:  # pragma: no cover - defensive
+        except json.JSONDecodeError:
             cleaned = cleaned_text
         return {"ok": True, "tool": name, "result": cleaned, "source": "registry"}
-
-    # ── Argument validation & timeout helpers ─────────────────────────
 
     @staticmethod
     def _validate_args(
         spec: ToolSpec, args: dict[str, Any]
     ) -> tuple[dict[str, Any] | None, str | None]:
-        """Merge defaults and validate ``args`` against the parameter schema.
-
-        Args:
-            spec: The tool specification (its ``parameters`` map).
-            args: Raw keyword arguments from the caller (model, user, test).
-
-        Returns:
-            ``(effective_args, None)`` when valid — declared defaults filled
-            in — or ``(None, error_message)`` when a required parameter is
-            missing or a value has the wrong type. Tools without a parameter
-            schema accept anything (schema-less helpers like ``list_regions``).
-        """
+        """Merge defaults and validate args against parameter schema."""
         schema = spec.parameters or {}
         effective = dict(args)
         for name, meta in schema.items():
@@ -256,36 +186,16 @@ class ToolRegistry:
         return effective, None
 
 
-# ── Timeout execution ─────────────────────────────────────────────────────
-
+# Timeout helper
 
 def _call_with_timeout(func: Callable[..., Any], args: dict[str, Any], timeout: float) -> Any:
-    """Call ``func(**args)`` on a daemon thread and enforce ``timeout``.
-
-    A tool that hangs (slow pricing API, blocking RAG query) must never block
-    the pipeline: the call runs on a daemon thread and the caller waits at
-    most ``timeout`` seconds. On timeout the thread is left to finish in the
-    background — daemon threads never block interpreter exit — and the call
-    raises :class:`TimeoutError`. Exceptions raised inside the tool propagate
-    to the caller unchanged.
-
-    Args:
-        func:    The tool callable.
-        args:    Keyword arguments for the call.
-        timeout: Seconds to wait before giving up.
-
-    Returns:
-        The tool's return value.
-
-    Raises:
-        TimeoutError: The tool did not return within ``timeout`` seconds.
-    """
+    """Call func(**args) on a daemon thread and enforce timeout."""
     box: dict[str, Any] = {}
 
     def runner() -> None:
         try:
             box["value"] = func(**args)
-        except BaseException as exc:  # propagate any failure to the caller
+        except BaseException as exc:
             box["error"] = exc
 
     thread = threading.Thread(target=runner, daemon=True, name="cloudoptima-tool")
@@ -296,23 +206,14 @@ def _call_with_timeout(func: Callable[..., Any], args: dict[str, Any], timeout: 
             f"tool exceeded the {timeout:.0f}s execution limit and was abandoned"
         )
     if "error" in box:
-        # The runner only ever stores a BaseException under "error".
         raise box["error"]
     return box["value"]
 
 
-# ── Built-in tools ───────────────────────────────────────────────────────
-
+# Built-in tools
 
 def _get_live_price(service: str, region: str = "uaenorth") -> dict[str, Any]:
-    """Live Azure retail price for ``service`` in ``region`` (static fallback).
-
-    Imported lazily so tests can patch the source modules without touching
-    this registry.
-    """
-    from cloudoptima.pricing.azure_api import get_price_with_unit
-    from cloudoptima.pricing.static_db import lookup
-
+    """Retrieve live Azure retail price for service in region with static fallback."""
     result = get_price_with_unit(service, region)
     if result is not None:
         price, unit = result
@@ -342,23 +243,20 @@ def _get_live_price(service: str, region: str = "uaenorth") -> dict[str, Any]:
 
 
 def _compliance_lookup(query: str, framework: str = "", top_k: int = 3) -> dict[str, Any]:
-    """Retrieve compliance guidance passages for a question (RAG lookup)."""
-    from cloudoptima.compliance.rag import query_rag
-
+    """Retrieve compliance guidance passages using RAG."""
     top_k = max(1, min(int(top_k), 5))
-    passages = query_rag(query, framework, top_k)
+    rag = ComplianceRAG(Settings())
+    passages = rag.query_rag(query, framework, top_k)
     return {"query": query, "framework": framework, "passages": passages}
 
 
 def _list_regions() -> dict[str, Any]:
-    """All Azure regions CloudOptima lets users target."""
-    from cloudoptima.models import AzureRegion
-
+    """List supported Azure regions."""
     return {"regions": [region.value for region in AzureRegion]}
 
 
 def build_default_registry() -> ToolRegistry:
-    """Registry pre-loaded with the built-in read-only tools."""
+    """Create and configure default tool registry with built-in tools."""
     registry = ToolRegistry()
     registry.register(
         "get_live_price",
@@ -416,13 +314,13 @@ def build_default_registry() -> ToolRegistry:
     return registry
 
 
-# ── Singleton ─────────────────────────────────────────────────────────────
+# Singleton instance
 _registry: ToolRegistry | None = None
 _registry_lock = threading.Lock()
 
 
 def get_registry() -> ToolRegistry:
-    """Return the process-wide :class:`ToolRegistry` (lazily built)."""
+    """Return the process-wide ToolRegistry singleton."""
     global _registry
     if _registry is None:
         with _registry_lock:

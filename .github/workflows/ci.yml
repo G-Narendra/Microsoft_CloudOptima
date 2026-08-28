@@ -1,10 +1,5 @@
-# CloudOptima CI/CD — every push to `dev` runs the full quality gate; pushes to
-# `main` additionally deploy to Azure App Service (Phase 13, activates once the
-# app service + secrets exist).
-#
-# The gate mirrors what we prove locally: lint, typecheck, 478 tests with the
-# 85% coverage floor, the deterministic red-team gate, the PyRIT campaign, the
-# evaluation harness, AGT policy lint, and an MCP round-trip smoke test.
+# CloudOptima CI/CD pipeline.
+# Runs quality gates and integration tests.
 
 name: CI/CD
 
@@ -43,6 +38,21 @@ jobs:
       - name: Mypy typecheck
         run: mypy cloudoptima/
 
+      - name: Bandit SAST
+        run: |
+          pip install bandit
+          bandit -r cloudoptima/ scripts/ -ll
+
+      - name: Semgrep SAST
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: "p/python"
+
+      - name: Pip-audit
+        run: |
+          pip install pip-audit
+          pip-audit
+
       - name: Pytest + coverage gate
         run: pytest
 
@@ -67,31 +77,64 @@ jobs:
           assert r['ok'] is True, r;
           print('MCP round-trip OK:', r['source'])"
 
+      - name: Upload evaluation metrics artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evaluation-metrics
+          path: scripts/evaluate/results/latest_eval.json
+          retention-days: 14
+
+      - name: Build Docker Image for Trivy
+        run: docker build -t cloudoptima:ci .
+        
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'cloudoptima:ci'
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+
+  docker-compose-test:
+    name: Local Docker Compose Integration
+    needs: quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        
+      - name: Start services
+        run: docker compose up -d
+        
+      - name: Wait for services
+        run: sleep 15
+        
+      - name: Verify containers are running
+        run: docker compose ps | grep Up
+        
+      - name: Tear down
+        if: always()
+        run: docker compose down
+
   deploy:
     name: Deploy to Azure App Service
-    needs: quality
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: docker-compose-test
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Log in to Azure (OIDC, no stored secrets)
-        uses: azure/login@v2
+      - name: Login to Azure
+        uses: azure/login@v1
         with:
-          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID }}
-          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID }}
-          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID }}
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Deploy web app
+      - name: Deploy to Azure Web App
         uses: azure/webapps-deploy@v3
         with:
           app-name: ${{ env.AZURE_WEBAPP_NAME }}
-          package: "."
-
-      - name: Azure logout
-        if: always()
-        run: az logout
+          package: .

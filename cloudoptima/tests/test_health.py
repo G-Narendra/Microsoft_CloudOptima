@@ -5,9 +5,14 @@ result collection with include/exclude filters and exception safety, and
 overall_status() aggregation to healthy / degraded / unhealthy.
 """
 
-from __future__ import annotations
-
+from collections import namedtuple
 import datetime
+from unittest.mock import patch
+
+try:
+    import psutil
+except ImportError:
+    psutil = None  # type: ignore
 
 from cloudoptima import health
 from cloudoptima.health import (
@@ -31,8 +36,7 @@ def _entry(
     return {"passed": passed, "detail": detail, "timestamp": _now()}
 
 
-# ── Registry ──────────────────────────────────────────────────────────────
-
+# Registry tests
 
 def test_registry_has_all_prebuilt_checks() -> None:
     """All six pre-built checks are registered at import time."""
@@ -56,11 +60,10 @@ def test_register_and_unregister() -> None:
     assert "test_custom_check" in list_checks()
     unregister("test_custom_check")
     assert "test_custom_check" not in list_checks()
-    unregister("does_not_exist")  # must not raise
+    unregister("does_not_exist")
 
 
-# ── check_all ─────────────────────────────────────────────────────────────
-
+# check_all tests
 
 def test_check_all_returns_typed_entries() -> None:
     """Every registered check produces a (passed, detail, timestamp) result."""
@@ -101,8 +104,7 @@ def test_check_all_never_crashes_on_throwing_check() -> None:
         unregister("test_throwing_check")
 
 
-# ── overall_status ────────────────────────────────────────────────────────
-
+# overall_status tests
 
 def test_overall_status_healthy() -> None:
     results = {"a": _entry(True), "b": _entry(True)}
@@ -129,8 +131,7 @@ def test_overall_status_runs_checks_when_none() -> None:
     assert status in {"healthy", "degraded", "unhealthy"}
 
 
-# ── Real environment smoke test ───────────────────────────────────────────
-
+# Real environment smoke test
 
 def test_real_health_checks_do_not_crash() -> None:
     """Running all real checks in the dev environment never raises."""
@@ -141,8 +142,7 @@ def test_real_health_checks_do_not_crash() -> None:
         assert isinstance(entry["detail"], str)
 
 
-# ── Module-level sanity (also ensures health module is importable) ────────
-
+# Module-level sanity
 
 def test_health_module_is_registry_backed() -> None:
     """The health module exposes the documented public API."""
@@ -151,3 +151,102 @@ def test_health_module_is_registry_backed() -> None:
     assert callable(health.check_all)
     assert callable(health.overall_status)
     assert callable(health.list_checks)
+
+
+# Coverage tests for specific checks
+
+def test_register_overwrite(caplog):
+    """Test that registering an existing check logs a warning."""
+    @register("test_overwrite")
+    def _test1(): return True, "1"
+    
+    @register("test_overwrite")
+    def _test2(): return True, "2"
+    
+    assert "already registered" in caplog.text
+    unregister("test_overwrite")
+
+def test_python_version_fail():
+    with patch("sys.version_info", (3, 10, 0)):
+        passed, msg = health._check_python_version()
+        assert not passed
+        assert "upgrade needed" in msg
+
+def test_disk_space_branches():
+    Usage = namedtuple("Usage", ["used", "total", "free"])
+    
+    # Warning
+    with patch("shutil.disk_usage", return_value=Usage(86, 100, 14)):
+        passed, msg = health._check_disk_space()
+        assert passed
+        assert "WARNING" in msg
+        
+    # Critical
+    with patch("shutil.disk_usage", return_value=Usage(96, 100, 4)):
+        passed, msg = health._check_disk_space()
+        assert not passed
+        assert "CRITICAL" in msg
+        
+    # Exception
+    with patch("shutil.disk_usage", side_effect=OSError("disk error")):
+        passed, msg = health._check_disk_space()
+        assert not passed
+        assert "disk error" in msg
+
+def test_memory_branches():
+    Mem = namedtuple("Mem", ["percent", "available"])
+    
+    # Warning
+    with patch("psutil.virtual_memory", return_value=Mem(85.0, 1024**3)):
+        passed, msg = health._check_memory()
+        assert passed
+        assert "WARNING" in msg
+        
+    # Critical
+    with patch("psutil.virtual_memory", return_value=Mem(95.0, 1024**3)):
+        passed, msg = health._check_memory()
+        assert not passed
+        assert "CRITICAL" in msg
+
+def test_audit_log_dir_fail():
+    with patch("cloudoptima.observability.AuditLogger", side_effect=OSError("permission denied")):
+        passed, msg = health._check_audit_log_dir()
+        assert not passed
+        assert "NOT writable" in msg
+
+def test_llm_client_ping_branches():
+    # Routed
+    with patch("cloudoptima.config.Settings") as mock_settings:
+        mock_s = MagicMock()
+        mock_s.routing_enabled = True
+        mock_settings.return_value = mock_s
+        
+        with patch("cloudoptima.llm_routing.create_routed_client") as mock_crc:
+            mock_crc.return_value.chosen_providers.return_value = ["mock1", "mock2"]
+            passed, msg = health._check_llm_client_ping()
+            assert passed
+            assert "mock1, mock2" in msg
+            
+    # Factory returns None
+    with patch("cloudoptima.config.Settings") as mock_settings:
+        mock_s = MagicMock()
+        mock_s.routing_enabled = False
+        mock_s.llm_provider = "invalid"
+        mock_settings.return_value = mock_s
+        
+        with patch("cloudoptima.llm_client.create_llm_client", return_value=None):
+            passed, msg = health._check_llm_client_ping()
+            assert not passed
+            assert "returned None" in msg
+            
+    # Exception
+    with patch("cloudoptima.config.Settings", side_effect=Exception("config error")):
+        passed, msg = health._check_llm_client_ping()
+        assert not passed
+        assert "config error" in msg
+
+def test_cache_branches():
+    with patch("cloudoptima.llm_cache.LLMCache", side_effect=Exception("cache error")):
+        passed, msg = health._check_cache()
+        assert not passed
+        assert "cache error" in msg

@@ -1,9 +1,9 @@
-"""Phase 7 dashboard tests — pure helpers and Streamlit AppTest integration."""
-
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
+import pytest
 from streamlit.testing.v1 import AppTest
 
 from cloudoptima.dashboard import (
@@ -26,8 +26,8 @@ from cloudoptima.models import (
 
 _DASHBOARD_PATH = Path(__file__).resolve().parents[1] / "dashboard.py"
 
-# ── build_session ───────────────────────────────────────────────────────
 
+# build_session tests
 
 class TestBuildSession:
     def test_cleans_all_user_input(self) -> None:
@@ -92,8 +92,7 @@ class TestBuildSession:
         assert [str(f) for f in session.compliance_frameworks] == ["pdpl"]
 
 
-# ── Pure helpers ────────────────────────────────────────────────────────
-
+# Pure helper tests
 
 class TestHelpers:
     def test_agent_display_name_accepts_str_and_enum(self) -> None:
@@ -163,8 +162,7 @@ class TestHelpers:
         assert build_agent_markdown(turn) == "LLM call failed"
 
 
-# ── Streamlit integration (AppTest) ─────────────────────────────────────
-
+# Streamlit integration tests (AppTest)
 
 class TestDashboardApp:
     # The full-flow reruns poll a real 5-agent pipeline on a background thread;
@@ -173,33 +171,56 @@ class TestDashboardApp:
     # the test exercises, not a slow network call).
     _RUN_TIMEOUT = 90
 
+    @pytest.fixture(autouse=True)
+    def _mock_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("LLM_PROVIDER", "mock")
+        monkeypatch.setenv("ROUTING_ENABLED", "false")
+
     def _run_analysis(
         self,
         project_name: str = "E-Shop",
         context: str = "Design a scalable web app for the UAE market",
     ) -> AppTest:
         app = AppTest.from_file(str(_DASHBOARD_PATH), default_timeout=self._RUN_TIMEOUT)
+        app.session_state["role"] = "admin"
         app.run()
         assert not app.exception
 
         # Form widgets (index order matches the form layout).
+        print(f"DEBUG: Setting form values")
         app.text_input[0].set_value(project_name)
         app.multiselect[0].set_value(["pdpl"])
         app.text_area[0].set_value("Web app, API, PostgreSQL")
         app.text_area[1].set_value(context)
+        print(f"DEBUG: Clicking analyze button")
         app.button[0].click()
+        print(f"DEBUG: Running app (triggering analysis)")
         app.run()
+        print(f"DEBUG: App run finished")
         assert not app.exception
         # One more rerun: the sidebar history is populated on the next pass,
         # exactly as a user would see it after the analysis completes.
         app.run()
         assert not app.exception
+        # Ensure we have admin role so we can approve
+        app.session_state["role"] = "admin"
         return app
 
     def test_full_flow_produces_results(self) -> None:
         app = self._run_analysis()
+        
+        # We should be in pending_approval state
         titles = [t.value for t in app.title]
         assert "Analysis results" in titles
+        
+        # Click the "Approve Design & Generate Artifacts" button
+        # It's typically the last or specific button in the overview tab
+        approve_buttons = [b for b in app.button if b.label == "Approve Design & Generate Artifacts"]
+        assert len(approve_buttons) == 1
+        approve_buttons[0].click()
+        app.run()
+        assert not app.exception
+
         markdown = [m.value for m in app.markdown]
         assert any("architecture.bicep" in m for m in markdown)
         assert any("cost_forecast.json" in m for m in markdown)
@@ -223,6 +244,7 @@ class TestDashboardApp:
 
     def test_initial_page_shows_form(self) -> None:
         app = AppTest.from_file(str(_DASHBOARD_PATH), default_timeout=self._RUN_TIMEOUT)
+        app.session_state["role"] = "admin"
         app.run()
         assert not app.exception
         # Sanity: initial page shows the input form and no results yet.

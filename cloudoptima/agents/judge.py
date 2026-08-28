@@ -1,13 +1,4 @@
-"""JudgeAgent — arbitrates disagreements between the four specialist agents.
-
-The judge reviews all four agent outputs and the detected conflicts, then
-produces an arbitration summary, a final recommendation, and the list of
-agents whose proposals were overridden.
-
-Hard rule: the judge may override any recommendation but can **never** suggest
-disabling security controls. Validation rejects any final recommendation
-containing ``disable_encryption`` or ``disable_mfa``.
-"""
+"""JudgeAgent — arbitrates disagreements between the four specialist agents."""
 
 from __future__ import annotations
 
@@ -17,11 +8,7 @@ from typing import Any, Final
 from cloudoptima.agent_base import _DELIMITER_MARKER, BaseAgent
 from cloudoptima.models import AgentType, Session
 
-# Phrases that must never appear in a final recommendation. Kept as exact
-# substrings (lowercased for the match) so the check is simple and auditable.
 _BANNED_PHRASES: Final[tuple[str, ...]] = ("disable_encryption", "disable_mfa")
-
-# Phase 10.2: the judge's contract is exactly these keys.
 _ALLOWED_KEYS: Final[frozenset[str]] = frozenset(
     {"arbitration", "final_recommendation", "overridden_agents"}
 )
@@ -32,15 +19,16 @@ _ALLOWED_SUMMARY_KEYS: Final[frozenset[str]] = frozenset(
     {"dimension", "agents_involved", "issue", "resolution"}
 )
 
-_JUDGE_SYSTEM_PROMPT = """\
-You are an impartial judge overseeing a panel of four cloud expert agents.
-Review their outputs and the detected conflicts, then arbitrate. You may
-override any recommendation, but you can never suggest disabling security
-controls such as encryption or MFA.
-
-Return ONLY valid JSON with exactly this structure — no prose outside the JSON:
-
-{
+_ROLE = "You are an impartial judge overseeing a panel of four cloud expert agents."
+_CAPABILITIES = (
+    "Review their outputs and the detected conflicts, then arbitrate. "
+    "You may override any recommendation."
+)
+_CONSTRAINTS = (
+    "You can never suggest disabling security controls such as encryption or MFA. "
+    "Return ONLY valid JSON with exactly the required structure — no prose outside the JSON."
+)
+_OUTPUT_SCHEMA = """{
   "arbitration": {
     "conflicts_detected": 0,
     "conflict_summaries": [
@@ -50,7 +38,20 @@ Return ONLY valid JSON with exactly this structure — no prose outside the JSON
   },
   "final_recommendation": "string",
   "overridden_agents": ["string", "..."]
-}
+}"""
+
+_JUDGE_SYSTEM_PROMPT = f"""
+# ROLE
+{_ROLE}
+
+# CAPABILITIES
+{_CAPABILITIES}
+
+# CONSTRAINTS
+{_CONSTRAINTS}
+
+# OUTPUT SCHEMA
+{_OUTPUT_SCHEMA}
 """
 
 

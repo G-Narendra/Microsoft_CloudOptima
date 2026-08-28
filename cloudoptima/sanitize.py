@@ -34,6 +34,12 @@ import unicodedata
 from collections.abc import Callable
 from typing import Any, Protocol
 
+try:
+    import redis
+    _REDIS_AVAILABLE = True
+except ImportError:
+    _REDIS_AVAILABLE = False
+
 __all__ = [
     "DEFAULT_MAX_LENGTH",
     "MemoryRateLimitStore",
@@ -839,15 +845,13 @@ class RedisRateLimitStore:
         self._client = client
 
     def _get_client(self) -> Any:
-        """Lazily import redis and build a client on first use."""
+        """Lazily initialize redis client on first use."""
         if self._client is None:
-            try:
-                import redis
-            except ImportError as exc:
+            if not _REDIS_AVAILABLE:
                 raise RuntimeError(
                     "rate_limit_backend='redis' requires the 'redis' package. "
                     "Install it with: pip install redis"
-                ) from exc
+                )
             self._client = redis.from_url(self._url)
         return self._client
 
