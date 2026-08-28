@@ -114,7 +114,8 @@ class ComplianceOfficerAgent(BaseAgent):
         
         # Rewrite raw prompt into focused keywords
         raw_prompt = session.user_prompt or "compliance assessment"
-        focused_query = rag_engine.rewrite_query(raw_prompt, self.client)
+        oai_client = getattr(self.llm_client, "_client", None)
+        focused_query = rag_engine.rewrite_query(raw_prompt, oai_client)
         _logger.info("Compliance RAG: Rewrote query from %r to %r", raw_prompt, focused_query)
 
         raw_passages = rag_engine.query_rag(

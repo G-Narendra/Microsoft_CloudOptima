@@ -94,14 +94,15 @@ def _make_session(**overrides: Any) -> Session:
 
 def _real_orchestrator() -> Orchestrator:
     """Orchestrator with all five real agents over MockClient (demo mode)."""
-    return Orchestrator.from_settings(Settings())
+    settings = Settings(_env_file=None, demo_mode=True, llm_provider="mock", routing_enabled=False)
+    return Orchestrator.from_settings(settings)
 
 
 def _orchestrator_with(
     overrides: dict[AgentType, BaseAgent] | None = None,
 ) -> Orchestrator:
     """Orchestrator with real agents except any listed in ``overrides``."""
-    settings = Settings()
+    settings = Settings(_env_file=None, demo_mode=True, llm_provider="mock", routing_enabled=False)
     llm = MockClient()
     context = AppContext.from_settings(settings)
     agents: dict[AgentType, BaseAgent] = {

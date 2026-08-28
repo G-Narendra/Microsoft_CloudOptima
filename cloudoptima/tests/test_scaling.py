@@ -95,7 +95,7 @@ def _make_session(**overrides: Any) -> Session:
 
 
 def _orchestrator_with_client(client: BaseLLMClient) -> Orchestrator:
-    settings = Settings()
+    settings = Settings(_env_file=None, demo_mode=True, llm_provider="mock", routing_enabled=False)
     context = AppContext.from_settings(settings)
     agents = {
         agent_type: agent_cls(agent_type, client, settings, context=context)

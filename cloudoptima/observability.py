@@ -57,20 +57,26 @@ class DriftMetric:
 class TraceEvent:
     """One observable event — typed, timestamped, immutable."""
 
-    event_type: str
+    event_type: str = "generic"
     agent_name: str = "unknown"
-    session_id: str | None = None
+    session_id: str | None = ""
+    status: str = "success"
     latency_ms: float = 0.0
     tokens_used: int = 0
-    input_summary: dict[str, JsonSerializable] = field(default_factory=dict)
-    output_summary: dict[str, JsonSerializable] = field(default_factory=dict)
+    extra: dict[str, Any] = field(default_factory=dict)
+    input_summary: dict[str, Any] = field(default_factory=dict)
+    output_summary: dict[str, Any] = field(default_factory=dict)
     cache_hit: bool = False
     validation_passed: bool = True
     error_message: str | None = None
-    metadata: dict[str, JsonSerializable] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
     timestamp: str = field(default_factory=lambda: datetime.datetime.now(datetime.UTC).strftime(_DATETIME_FMT))
     trace_id: str | None = None
     span_id: str | None = None
+
+    @property
+    def _timestamp(self) -> str:
+        return self.timestamp
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to a JSON-serializable dictionary."""
@@ -103,6 +109,10 @@ class AuditLogger:
         self._log_dir = Path(log_dir)
         self._lock = threading.Lock()
         self._log_dir.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def log_dir(self) -> Path:
+        return self._log_dir
 
     # Public API
 
@@ -250,24 +260,34 @@ def trace(
             session_id = _extract_session_id(args, kwargs)
             start = _now_monotonic()
             error_msg: str | None = None
+            error_type: str | None = None
             result: Any = None
 
             try:
                 result = func(*args, **kwargs)
                 return result
             except Exception as exc:
-                error_msg = f"{type(exc).__name__}: {exc}"
+                error_type = type(exc).__name__
+                error_msg = f"{error_type}: {exc}"
                 raise
             finally:
                 elapsed_ms = (_now_monotonic() - start) * 1000.0
+                extra_data: dict[str, Any] = {
+                    "function": getattr(func, "__name__", str(func)),
+                    "arg_count": len(args) + len(kwargs),
+                }
+                if error_type is not None:
+                    extra_data["error_type"] = error_type
                 event = TraceEvent(
                     event_type=event_type,
                     agent_name=effective_agent,
-                    session_id=session_id,
+                    session_id=session_id or "",
+                    status="success" if error_msg is None else "error",
                     latency_ms=round(elapsed_ms, 2),
                     input_summary=_safe_args(func_name, args, kwargs),
                     validation_passed=(error_msg is None),
                     error_message=error_msg,
+                    extra=extra_data,
                 )
                 audit.log(event)
 
@@ -277,24 +297,34 @@ def trace(
             session_id = _extract_session_id(args, kwargs)
             start = _now_monotonic()
             error_msg: str | None = None
+            error_type: str | None = None
             result: Any = None
 
             try:
                 result = await func(*args, **kwargs)
                 return result
             except Exception as exc:
-                error_msg = f"{type(exc).__name__}: {exc}"
+                error_type = type(exc).__name__
+                error_msg = f"{error_type}: {exc}"
                 raise
             finally:
                 elapsed_ms = (_now_monotonic() - start) * 1000.0
+                extra_data: dict[str, Any] = {
+                    "function": getattr(func, "__name__", str(func)),
+                    "arg_count": len(args) + len(kwargs),
+                }
+                if error_type is not None:
+                    extra_data["error_type"] = error_type
                 event = TraceEvent(
                     event_type=event_type,
                     agent_name=effective_agent,
-                    session_id=session_id,
+                    session_id=session_id or "",
+                    status="success" if error_msg is None else "error",
                     latency_ms=round(elapsed_ms, 2),
                     input_summary=_safe_args(func_name, args, kwargs),
                     validation_passed=(error_msg is None),
                     error_message=error_msg,
+                    extra=extra_data,
                 )
                 audit.log(event)
 
@@ -363,6 +393,14 @@ class AnomalyDetector:
 
             self._update(base, response_length, tokens_used)
         return flags
+
+    def baseline(self, agent: str) -> tuple[float, float]:
+        """Return (length_ewma, tokens_ewma) for agent."""
+        with self._lock:
+            base = self._baselines.get(agent)
+            if base is None:
+                return (0.0, 0.0)
+            return (base.length_ewma, base.tokens_ewma)
 
     def baseline_for(self, agent: str) -> dict[str, float | int]:
         """Return a snapshot of the current baseline for ``agent``."""

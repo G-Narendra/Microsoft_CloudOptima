@@ -194,11 +194,14 @@ class LLMCache(BaseLLMCache):
     def stats(self) -> dict[str, Any]:
         """Return cache hit/miss statistics."""
         with self._lock:
+            total = self._stats.hits + self._stats.misses
+            hit_rate = self._stats.hits / total if total > 0 else 0.0
             return {
                 "entries": len(self._store),
                 "total_size_bytes": self._total_size(),
                 "hits": self._stats.hits,
                 "misses": self._stats.misses,
+                "hit_rate": hit_rate,
                 "evictions": self._stats.evictions,
                 "errors": self._stats.errors,
             }
@@ -218,9 +221,11 @@ class RedisLLMCache(BaseLLMCache):
 
     def _get_client(self) -> Any:
         if self._client is None:
-            if not _REDIS_AVAILABLE:
-                raise RuntimeError("redis package is required for RedisLLMCache")
-            self._client = redis.from_url(self._url)
+            try:
+                import redis
+                self._client = redis.from_url(self._url)
+            except Exception as e:
+                raise RuntimeError("redis package is required for RedisLLMCache") from e
         return self._client
     
     def get(self, prompt: str, system_prompt: str, model: str, temperature: float) -> str | None:
@@ -259,9 +264,7 @@ class RedisLLMCache(BaseLLMCache):
             client = self._get_client()
             for key in client.scan_iter(f"{self._prefix}*"):
                 client.delete(key)
-            _logger.info("Redis cache cleared")
         except Exception:
-            _logger.warning("Redis cache clear error", exc_info=True)
             self._stats.errors += 1
 
     def stats(self) -> dict[str, Any]:
@@ -276,9 +279,9 @@ class RedisLLMCache(BaseLLMCache):
 
 
 class SemanticRedisLLMCache(BaseLLMCache):
-    """Distributed Redis-backed Semantic LLM response cache."""
+    """Semantic Redis-backed LLM response cache using Vector Search (RediSearch)."""
     
-    def __init__(self, url: str, ttl_hours: int = 24, similarity_threshold: float = 0.98) -> None:
+    def __init__(self, url: str, ttl_hours: int = 24, similarity_threshold: float = 0.90) -> None:
         if not url:
             raise ValueError("redis_url is required for SemanticRedisLLMCache")
         self._url = url
@@ -290,19 +293,21 @@ class SemanticRedisLLMCache(BaseLLMCache):
 
     def _get_client(self) -> Any:
         if self._client is None:
-            if not _REDIS_AVAILABLE:
-                raise RuntimeError("redis package is required for SemanticRedisLLMCache")
-            self._client = redis.from_url(self._url)
+            try:
+                import redis
+                self._client = redis.from_url(self._url)
+            except Exception as e:
+                raise RuntimeError("redis package is required for SemanticRedisLLMCache") from e
         return self._client
 
     def _get_embedding(self, text: str) -> list[float]:
-        if _OPENAI_AVAILABLE:
-            try:
-                client = openai.Client()
-                response = client.embeddings.create(input=text, model="text-embedding-3-small")
-                return response.data[0].embedding
-            except Exception:
-                pass
+        try:
+            import openai
+            client = openai.Client()
+            response = client.embeddings.create(input=text, model="text-embedding-3-small")
+            return response.data[0].embedding
+        except Exception:
+            pass
 
         _logger.debug("Falling back to deterministic embedding generation")
         h = hashlib.sha256(text.encode("utf-8")).digest()
@@ -321,32 +326,39 @@ class SemanticRedisLLMCache(BaseLLMCache):
                 self._stats.hits += 1
                 return gzip.decompress(compressed).decode("utf-8")
             
-            if _NUMPY_AVAILABLE:
+            try:
+                import numpy as np
                 query_emb = np.array(self._get_embedding(prompt), dtype=np.float32).tobytes()
-                try:
-                    q = (
-                        f"(@system_prompt:{{{system_prompt}}} @model:{{{model}}}) "
-                        f"=>[KNN 1 @prompt_vector $vec AS score]"
-                    )
-                    res = client.execute_command(
-                        "FT.SEARCH", "idx:semcache", q, 
-                        "PARAMS", "2", "vec", query_emb,
-                        "DIALECT", "2",
-                        "RETURN", "2", "score", "response"
-                    )
-                    if res and len(res) > 2 and isinstance(res[2], list):
-                        fields = res[2]
-                        score_idx = fields.index(b"score") + 1
-                        resp_idx = fields.index(b"response") + 1
-                        score = float(fields[score_idx])
+                q = (
+                    f"(@system_prompt:{{{system_prompt}}} @model:{{{model}}}) "
+                    f"=>[KNN 1 @prompt_vector $vec AS score]"
+                )
+                res = client.execute_command(
+                    "FT.SEARCH", "idx:semcache", q, 
+                    "PARAMS", "2", "vec", query_emb,
+                    "DIALECT", "2",
+                    "RETURN", "2", "score", "response"
+                )
+                if res and len(res) > 2 and isinstance(res[2], list):
+                    fields = res[2]
+                    score = None
+                    compressed_resp = None
+                    for i in range(0, len(fields), 2):
+                        k = fields[i]
+                        v = fields[i + 1] if i + 1 < len(fields) else None
+                        k_str = k.decode("utf-8") if isinstance(k, bytes) else str(k)
+                        if k_str == "score":
+                            score = float(v.decode("utf-8") if isinstance(v, bytes) else v)
+                        elif k_str == "response":
+                            compressed_resp = v
+                    
+                    if score is not None and compressed_resp is not None:
                         similarity = 1.0 - score
-                        
                         if similarity >= self._similarity_threshold:
-                            compressed_resp = fields[resp_idx]
                             self._stats.hits += 1
                             return gzip.decompress(compressed_resp).decode("utf-8")
-                except Exception:
-                    pass
+            except Exception:
+                pass
 
             self._stats.misses += 1
             return None
@@ -366,7 +378,8 @@ class SemanticRedisLLMCache(BaseLLMCache):
             compressed = gzip.compress(response.encode("utf-8"))
             client.set(exact_key, compressed, ex=self._ttl_seconds)
             
-            if _NUMPY_AVAILABLE:
+            try:
+                import numpy as np
                 emb_bytes = np.array(self._get_embedding(prompt), dtype=np.float32).tobytes()
                 semantic_key = f"{self._prefix}hash:{hashlib.sha256(prompt.encode('utf-8')).hexdigest()}"
                 client.hset(semantic_key, mapping={
@@ -377,6 +390,8 @@ class SemanticRedisLLMCache(BaseLLMCache):
                     "response": compressed
                 })
                 client.expire(semantic_key, self._ttl_seconds)
+            except Exception:
+                pass
             
         except Exception:
             _logger.warning("Semantic Redis cache put error", exc_info=True)

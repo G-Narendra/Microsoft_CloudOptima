@@ -16,10 +16,13 @@ _logger = logging.getLogger(__name__)
 
 # Optional Agent Governance Toolkit import
 try:
-    from agentmesh.governance import PolicyEngine as _PolicyEngine
+    from agentmesh.governance import PolicyEngine
     AGT_AVAILABLE = True
 except Exception:
     AGT_AVAILABLE = False
+    PolicyEngine = None  # type: ignore
+
+_AGT_AVAILABLE = AGT_AVAILABLE
 
 POLICY_PATH: Final[Path] = Path(__file__).parent / "policies" / "tools.yaml"
 _AGT_AGENT_ID: Final[str] = "cloudoptima"
@@ -39,6 +42,10 @@ class Verdict(StrEnum):
 
 class GovernanceDeniedError(Exception):
     """Raised when the policy denies an action."""
+
+    def __init__(self, message: str, verdict: Verdict = Verdict.DENY) -> None:
+        super().__init__(message)
+        self.verdict = verdict
 
 
 class GovernanceNeedsApprovalError(Exception):
@@ -88,7 +95,8 @@ def check_action(
     action_type = str(action.get("type", ""))
     verdict = _verdict_for(action_type)
 
-    if AGT_AVAILABLE:
+    is_avail = globals().get("_AGT_AVAILABLE", AGT_AVAILABLE)
+    if is_avail:
         agt_verdict = _agt_evaluate(action)
         if agt_verdict is not None and _verdict_stricter(agt_verdict, verdict):
             verdict = agt_verdict
@@ -104,7 +112,7 @@ def check_action(
                         "action_type": action_type,
                         "rule": f"policy:{action_type}",
                         "verdict": verdict.value,
-                        "agt": AGT_AVAILABLE,
+                        "agt": is_avail,
                     },
                 )
             )
@@ -121,24 +129,25 @@ def check_action(
 def _agt_engine() -> Any | None:
     """Return the lazily-built AGT PolicyEngine, or None."""
     global _agt_engine_instance, _agt_engine_failed
-    if (
-        _agt_engine_instance is not None
-        or _agt_engine_failed
-        or not AGT_AVAILABLE
-    ):
+    is_avail = globals().get("_AGT_AVAILABLE", AGT_AVAILABLE)
+    pe_cls = globals().get("PolicyEngine", None)
+    if not is_avail or pe_cls is None:
+        return None
+    if _agt_engine_instance is not None and getattr(_agt_engine_instance, "__class__", None) is pe_cls:
         return _agt_engine_instance
     with _agt_lock:
-        if _agt_engine_instance is None and not _agt_engine_failed:
-            try:
-                engine = _PolicyEngine()
+        try:
+            engine = pe_cls()
+            if hasattr(engine, "load_yaml_file"):
                 engine.load_yaml_file(str(POLICY_PATH))
-                _agt_engine_instance = engine
-            except Exception:
-                _agt_engine_failed = True
-                _logger.debug(
-                    "AGT PolicyEngine failed to load — using offline policy", exc_info=True
-                )
-    return _agt_engine_instance
+            _agt_engine_instance = engine
+            return _agt_engine_instance
+        except Exception:
+            _agt_engine_failed = True
+            _logger.debug(
+                "AGT PolicyEngine failed to load — using offline policy", exc_info=True
+            )
+            return None
 
 
 def _agt_evaluate(action: dict[str, Any]) -> Verdict | None:
@@ -157,13 +166,16 @@ def _agt_evaluate(action: dict[str, Any]) -> Verdict | None:
             },
             stage="pre_tool",
         )
+        action_val = str(getattr(decision, "action", "")).lower()
+        if hasattr(getattr(decision, "action", None), "value"):
+            action_val = str(decision.action.value).lower()
         mapping = {
             "allow": Verdict.ALLOW,
             "deny": Verdict.DENY,
             "require_approval": Verdict.REQUIRE_APPROVAL,
             "warn": Verdict.ALLOW,
         }
-        return mapping.get(str(getattr(decision, "action", "")))
+        return mapping.get(action_val)
     except Exception:
         _logger.debug("AGT evaluation failed — using offline policy", exc_info=True)
         return None
@@ -179,7 +191,8 @@ def enforce_action(
     if verdict == Verdict.DENY:
         raise GovernanceDeniedError(
             f"Action denied by policy rule '{action.get('type', '')}' — "
-            "destructive operations are not permitted"
+            "destructive operations are not permitted",
+            verdict=Verdict.DENY,
         )
     if verdict == Verdict.REQUIRE_APPROVAL:
         raise GovernanceNeedsApprovalError(
@@ -188,11 +201,21 @@ def enforce_action(
 
 
 def governed_callable(
-    func: Any,
-    action_type: str,
+    action_or_func: Any,
+    func_or_action: Any = None,
     settings: Settings | None = None,
 ) -> Any:
     """Wrap func so every call is governance-checked before execution."""
+    if callable(action_or_func) and isinstance(func_or_action, str):
+        func = action_or_func
+        action_type = func_or_action
+    elif isinstance(action_or_func, str) and callable(func_or_action):
+        action_type = action_or_func
+        func = func_or_action
+    else:
+        func = action_or_func
+        action_type = str(func_or_action)
+
     @functools.wraps(func)
     def wrapped(*args: Any, **kwargs: Any) -> Any:
         enforce_action({"type": action_type, "params": kwargs}, settings)

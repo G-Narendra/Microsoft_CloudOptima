@@ -177,7 +177,7 @@ class TestRouting:
 @pytest.mark.asyncio
 async def test_routed_agenerate():
     """Test the async generation path (agenerate)."""
-    settings = Settings(llm_provider="mock", routing_enabled=True)
+    settings = Settings(llm_provider="mock", routing_enabled=True, routing_providers=["mock"])
     router = create_routed_client(settings)
     class SucceedingAsyncClient:
         def __init__(self):
@@ -187,7 +187,14 @@ async def test_routed_agenerate():
             yield "_"
             yield "chunk"
             
-    router._clients[("mock", "fast")] = SucceedingAsyncClient()
+    router._clients = {
+        ("mock", "fast"): SucceedingAsyncClient(),
+        ("mock", "smart"): SucceedingAsyncClient(),
+    }
+    router._models = {
+        ("mock", "fast"): "mock",
+        ("mock", "smart"): "mock",
+    }
     
     chunks = []
     async for chunk in router.agenerate("test", "sys"):

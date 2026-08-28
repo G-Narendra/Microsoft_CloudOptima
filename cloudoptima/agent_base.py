@@ -233,17 +233,13 @@ class BaseAgent(ABC):
     # Shared helpers
 
     def _prior_turn_json(self, session: Session, agent_type: AgentType, max_length: int = 15000) -> str:
-        """
+        """Render a previous agent's validated output as a JSON block."""
         for turn in session.agent_turns:
             if turn.agent_type == agent_type and "error" not in turn.output:
                 try:
                     block = json.dumps(turn.output, indent=2, ensure_ascii=False)
-                except (TypeError, ValueError):  # pragma: no cover - defensive
+                except (TypeError, ValueError):
                     return "(unrenderable)"
-                # The block is JSON, so it cannot go through _wrap_field (that
-                # would strip the quotes). But we still strip delimiter-marker
-                # runs, so upstream content can never forge a "--- FIELD ---"
-                # boundary inside a downstream prompt.
                 sanitized = _DELIMITER_MARKER.sub("", block)
                 if len(sanitized) > max_length:
                     sanitized = sanitized[:max_length] + "\n... [TRUNCATED FOR CONTEXT BUDGET]"

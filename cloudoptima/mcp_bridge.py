@@ -19,6 +19,9 @@ try:
     MCP_AVAILABLE = True
 except Exception:
     MCP_AVAILABLE = False
+    ClientSession = None  # type: ignore
+    StdioServerParameters = None  # type: ignore
+    stdio_client = None  # type: ignore
 
 
 class MCPBridge:
@@ -99,11 +102,14 @@ class MCPBridge:
     # MCP transport internals
 
     @staticmethod
-    def _server_params() -> StdioServerParameters:
-        return StdioServerParameters(
-            command=sys.executable,
-            args=["-m", "cloudoptima.mcp_server"],
-        )
+    def _server_params() -> Any:
+        params_cls = globals().get("StdioServerParameters")
+        if params_cls is not None:
+            return params_cls(
+                command=sys.executable,
+                args=["-m", "cloudoptima.mcp_server"],
+            )
+        return None
 
     async def _list_tools_mcp(self) -> list[dict[str, Any]]:
         async with stdio_client(self._server_params()) as (read, write):

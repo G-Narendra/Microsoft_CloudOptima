@@ -59,7 +59,7 @@
 
 ## Phase 4: BaseAgent Core Architecture ✅ COMPLETE
 
-- [x] Implement `BaseAgent` template method pattern in `cloudoptima/agents/agent_base.py`
+- [x] Implement `BaseAgent` template method pattern in `cloudoptima/agent_base.py`
 - [x] Standardize execution loop: prompt creation → input sanitization → cache lookup → LLM call → output cleaning → schema validation → turn wrapping
 - [x] Enforce strict prompt isolation with boundary delimiters
 - [x] Implement structured error turns (`error_kind`: `llm`, `parse`, `validation`, `prompt_build`)

@@ -13,8 +13,8 @@ from cloudoptima.compliance.rag import ComplianceRAG
 from cloudoptima.config import Settings
 from cloudoptima.governance import enforce_action
 from cloudoptima.models import AzureRegion
-from cloudoptima.pricing.azure_api import get_price_with_unit
-from cloudoptima.pricing.static_db import lookup
+import cloudoptima.pricing.azure_api as azure_api
+import cloudoptima.pricing.static_db as static_db
 from cloudoptima.sanitize import clean_output, detect_injection, scan_llm_output
 
 _logger = logging.getLogger(__name__)
@@ -214,7 +214,7 @@ def _call_with_timeout(func: Callable[..., Any], args: dict[str, Any], timeout: 
 
 def _get_live_price(service: str, region: str = "uaenorth") -> dict[str, Any]:
     """Retrieve live Azure retail price for service in region with static fallback."""
-    result = get_price_with_unit(service, region)
+    result = azure_api.get_price_with_unit(service, region)
     if result is not None:
         price, unit = result
         return {
@@ -224,7 +224,7 @@ def _get_live_price(service: str, region: str = "uaenorth") -> dict[str, Any]:
             "unit": unit,
             "source": "azure_retail_api",
         }
-    fallback = lookup(service)
+    fallback = static_db.lookup(service)
     if fallback is not None:
         return {
             "service": service,

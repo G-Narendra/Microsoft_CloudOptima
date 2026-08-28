@@ -147,7 +147,7 @@ def _orchestrator_with(
     settings: Settings | None = None,
 ) -> Orchestrator:
     """Real pipeline where only the architect uses ``architect_client``."""
-    settings = settings or Settings()
+    settings = settings or Settings(_env_file=None, demo_mode=True, llm_provider="mock", routing_enabled=False)
     context = AppContext.from_settings(settings)
     llm = MockClient()
     agents: dict[AgentType, BaseAgent] = {

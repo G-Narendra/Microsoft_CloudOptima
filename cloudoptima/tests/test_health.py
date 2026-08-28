@@ -7,7 +7,7 @@ overall_status() aggregation to healthy / degraded / unhealthy.
 
 from collections import namedtuple
 import datetime
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 try:
     import psutil
@@ -197,56 +197,58 @@ def test_memory_branches():
     Mem = namedtuple("Mem", ["percent", "available"])
     
     # Warning
-    with patch("psutil.virtual_memory", return_value=Mem(85.0, 1024**3)):
+    with patch("cloudoptima.health.psutil") as mock_psutil, patch("cloudoptima.health._PSUTIL_AVAILABLE", True):
+        mock_psutil.virtual_memory.return_value = Mem(85.0, 1024**3)
         passed, msg = health._check_memory()
         assert passed
         assert "WARNING" in msg
         
     # Critical
-    with patch("psutil.virtual_memory", return_value=Mem(95.0, 1024**3)):
+    with patch("cloudoptima.health.psutil") as mock_psutil, patch("cloudoptima.health._PSUTIL_AVAILABLE", True):
+        mock_psutil.virtual_memory.return_value = Mem(95.0, 1024**3)
         passed, msg = health._check_memory()
         assert not passed
         assert "CRITICAL" in msg
 
 def test_audit_log_dir_fail():
-    with patch("cloudoptima.observability.AuditLogger", side_effect=OSError("permission denied")):
+    with patch("cloudoptima.health.AuditLogger", side_effect=OSError("permission denied")):
         passed, msg = health._check_audit_log_dir()
         assert not passed
         assert "NOT writable" in msg
 
 def test_llm_client_ping_branches():
     # Routed
-    with patch("cloudoptima.config.Settings") as mock_settings:
+    with patch("cloudoptima.health.Settings") as mock_settings:
         mock_s = MagicMock()
         mock_s.routing_enabled = True
         mock_settings.return_value = mock_s
         
-        with patch("cloudoptima.llm_routing.create_routed_client") as mock_crc:
+        with patch("cloudoptima.health.create_routed_client") as mock_crc:
             mock_crc.return_value.chosen_providers.return_value = ["mock1", "mock2"]
             passed, msg = health._check_llm_client_ping()
             assert passed
             assert "mock1, mock2" in msg
             
     # Factory returns None
-    with patch("cloudoptima.config.Settings") as mock_settings:
+    with patch("cloudoptima.health.Settings") as mock_settings:
         mock_s = MagicMock()
         mock_s.routing_enabled = False
         mock_s.llm_provider = "invalid"
         mock_settings.return_value = mock_s
         
-        with patch("cloudoptima.llm_client.create_llm_client", return_value=None):
+        with patch("cloudoptima.health.create_llm_client", return_value=None):
             passed, msg = health._check_llm_client_ping()
             assert not passed
             assert "returned None" in msg
             
     # Exception
-    with patch("cloudoptima.config.Settings", side_effect=Exception("config error")):
+    with patch("cloudoptima.health.Settings", side_effect=Exception("config error")):
         passed, msg = health._check_llm_client_ping()
         assert not passed
         assert "config error" in msg
 
 def test_cache_branches():
-    with patch("cloudoptima.llm_cache.LLMCache", side_effect=Exception("cache error")):
+    with patch("cloudoptima.health.LLMCache", side_effect=Exception("cache error")):
         passed, msg = health._check_cache()
         assert not passed
         assert "cache error" in msg

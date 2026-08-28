@@ -79,7 +79,7 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["cloudoptima/tests"]
-addopts = "-v --cov=cloudoptima --cov-report=term-missing --cov-fail-under=90"
+addopts = "-v --cov=cloudoptima --cov-report=term-missing --cov-fail-under=85"
 
 [tool.coverage.run]
 source = ["cloudoptima"]

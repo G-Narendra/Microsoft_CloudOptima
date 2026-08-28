@@ -7,7 +7,7 @@ Accepted & Enforced
 When designing the multi-agent execution pipeline, we evaluated whether to build on top of LangChain/LangGraph, Microsoft Agent Framework (MAF), or a purpose-built custom async orchestrator.
 
 ## Drawbacks Identified with LangChain in Initial Prototyping
-During the initial development of the CloudOptima prototype, Narendra identified several significant pain points with LangChain:
+During the initial architectural prototyping of CloudOptima, the team evaluated several significant pain points with LangChain:
 1. **Opaque Abstractions & Prompt Mutations:** LangChain's internal chains manipulate prompts and wrap outputs with hidden metadata, making it difficult to enforce our zero-trust prompt delimiters and strict Pydantic schema validation.
 2. **Brittle Error Propagation:** When an agent in a LangChain chain experiences a malformed response or API rate limit, the chain tends to fail completely rather than isolating the failure to an `error_kind` turn while allowing other agents to proceed.
 3. **Dependency Bloat & Version Conflicts:** Heavy dependency trees frequently conflicted with preview versions of enterprise Microsoft SDKs (`azure-ai-contentsafety`, `pyrit`, `agent-governance-toolkit`).

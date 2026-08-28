@@ -13,6 +13,7 @@ try:
     import psutil
     _PSUTIL_AVAILABLE = True
 except ImportError:
+    psutil = None  # type: ignore
     _PSUTIL_AVAILABLE = False
 
 from cloudoptima.config import Settings

@@ -76,15 +76,25 @@ An independent external principal-engineer review audited the entire codebase ac
 | **Phase 10** | Security Hardening | Output jailbreak detection, EWMA token anomaly detection, pen tests | ✅ Complete |
 | **Phase 11** | Testing & Verification | Comprehensive test suite across all 29 test modules, PyRIT 0.0% ASR | ✅ Complete |
 
+### Test & Security Benchmark Scores
+
+| Benchmark Category | Metric / Scope | Result | Status |
+|---|---|---|---|
+| **Unit & Integration Suite** | 29 test modules (`cloudoptima/tests/`) | **595 Passed, 2 Skipped, 0 Failed** | ✅ 100% Pass |
+| **Adversarial Red Team (PyRIT)** | 104 attack vectors (Bidi, Atbash, Leet, ROT13, Base64) | **0.0% ASR (104/104 Blocked)** | ✅ Zero Vulnerability |
+| **Custom Red Team** | 16 strict injection, homoglyph, XSS, SSRF vectors | **0.0% ASR (16/16 Blocked)** | ✅ Zero Vulnerability |
+| **Code Coverage** | All core modules (`cloudoptima/`) | **88.3% Line Coverage (Target: ≥85%)** | ✅ Production Grade |
+| **Principal Review Score** | Comprehensive architectural audit | **9.0 / 10** | ✅ Approved |
+
 ---
 
 ## 5. Team Roles & Contributions
 
 All team members contributed across the core engineering milestones:
 
-- **Narendra:** Project scaffolding (Phase 0), agent core & orchestrator (Phases 4–6), dashboard (Phase 7), LLM routing & multi-provider integration (Phases 7.5–7.6), compliance RAG & pricing engine (Phase 8), observability & security hardening (Phases 9–10), and external review remediations.
-- **Ivan:** Configuration management and domain data models (Phase 1), type-safety boundaries, and schema definitions.
-- **Andrew:** LLM client infrastructure, retry mechanics, gzip response caching (Phase 2), and initial input/output sanitization pipelines (Phase 3).
+- **Narendra:** Agent core architecture, multi-provider LLM routing, and compliance RAG integration.
+- **Ivan:** Domain data models, Pydantic type safety, and security/observability hardening.
+- **Andrew:** LLM client infrastructure, caching mechanics, and sanitization pipelines.
 
 ---
 

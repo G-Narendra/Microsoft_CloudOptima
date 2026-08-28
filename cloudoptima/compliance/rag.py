@@ -419,23 +419,8 @@ class ComplianceRAG:
         return self.backend in ("azure-search", "hybrid") or self._keyword is not None
 
     def seed_docs(self, docs: Sequence[tuple[str, str, str]] | None = None) -> int:
-        extra = list(docs or [])
-        
-        corpus_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "..", "corpus")
-        if os.path.isdir(corpus_dir):
-            for filename in os.listdir(corpus_dir):
-                if filename.endswith(".md") and filename.lower() != "readme.md":
-                    framework_name = filename[:-3] # remove .md
-                    filepath = os.path.join(corpus_dir, filename)
-                    try:
-                        with open(filepath, "r", encoding="utf-8") as f:
-                            text = f.read()
-                        extra.append((framework_name, framework_name, text))
-                        _logger.info("Loaded full corpus file: %s", filename)
-                    except Exception as e:
-                        _logger.error("Failed to load corpus file %s: %s", filename, e)
-                        
-        chunked_extra = self._semantic_chunk(extra)
+        extra = list(docs) if docs is not None else []
+        chunked_extra = self._semantic_chunk(extra) if extra else []
         if self.backend == "azure-search":
             return self._seed_azure(chunked_extra)
         if self.backend == "hybrid":
@@ -478,7 +463,7 @@ class ComplianceRAG:
     def _seed_azure(self, extra: Sequence[tuple[str, str, str]]) -> int:
         if self._search_client is None or self._oai_client is None:
             return 0
-        docs = [doc for doc in BUILTIN_DOCS + tuple(extra) if self._clean_doc(doc) is not None]
+        docs = [doc for doc in extra if self._clean_doc(doc) is not None]
         
         azure_docs = []
         for doc in docs:
@@ -519,7 +504,7 @@ class ComplianceRAG:
     def rewrite_query(self, raw_prompt: str, oai_client: Any) -> str:
         """Rewrite raw architecture prompt into compliance keywords using LLM."""
         if not raw_prompt or not oai_client:
-            return "compliance requirements"
+            return raw_prompt
             
         system_prompt = (
             "You are a compliance RAG query generator. Extract 3-5 core compliance or "

@@ -10,7 +10,7 @@ from cloudoptima.config import Settings
 
 def test_defaults_load() -> None:
     """Test that Settings loads with expected default values."""
-    settings = Settings()
+    settings = Settings(_env_file=None)
     assert settings.demo_mode is True
     assert settings.llm_provider == "mock"
     assert settings.llm_model == "gpt-4o-mini"

@@ -2,7 +2,7 @@
 
 - **Status:** Accepted — Maintain purpose-built custom orchestrator; revisit upon Azure AI Foundry Agent Service deployment
 - **Date:** August 2026
-- **Decision Owners:** Narendra
+- **Decision Owners:** CloudOptima Engineering Team (Narendra, Andrew, Ivan)
 - **Collaborating Microsoft Team:** Punit Shah (Issue #6)
 - **Related Implementation:** `cloudoptima/orchestrator.py`, `cloudoptima/agents/agent_base.py`, `docs/adr/`
 
@@ -39,9 +39,9 @@ This RFC documents the formal evaluation between building on top of existing age
 
 ---
 
-## 4. Why We Avoided LangChain: Findings from Narendra's Original CloudOptima
+## 4. Why We Avoided LangChain: Findings from Architecture Prototyping
 
-Before this Microsoft industrial project began, Narendra built the initial version of CloudOptima. During that original development phase, several critical architectural drawbacks of LangChain were directly experienced:
+During the initial architectural prototyping phase of CloudOptima, several critical drawbacks of generic agent frameworks like LangChain were directly evaluated:
 
 1. **Opaque Abstraction Layers & Prompt Mutations:**  
    LangChain's internal abstractions frequently inject hidden system prompts, format instructions, and wrappers. This directly interfered with the strict security requirements of sanitizing every user token and preventing prompt leakage.
@@ -52,7 +52,7 @@ Before this Microsoft industrial project began, Narendra built the initial versi
 4. **Unnecessary State Complexity on Structured Pipelines:**  
    For a structured 5-agent pipeline with deterministic 6-pair conflict analysis, LangChain's generic agents added indirection without delivering any capability that couldn't be implemented in clean, testable async Python code.
 
-Because Narendra had already identified these fundamental flaws, the team deliberately avoided LangChain and adopted the purpose-built custom async orchestrator **from the very beginning** of this Microsoft industrial project.
+Because these fundamental trade-offs were identified early, the team deliberately avoided LangChain and adopted the purpose-built custom async orchestrator **from the very beginning** of this Microsoft industrial project.
 
 ---
 

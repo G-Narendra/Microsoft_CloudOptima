@@ -82,6 +82,16 @@ ATTACK_CASES: tuple[AttackCase, ...] = (
 )
 
 
+_RAG_INSTANCE: ComplianceRAG | None = None
+
+
+def _get_rag() -> ComplianceRAG:
+    global _RAG_INSTANCE
+    if _RAG_INSTANCE is None:
+        _RAG_INSTANCE = ComplianceRAG(Settings())
+    return _RAG_INSTANCE
+
+
 def probe_payload(payload: str, obfuscated: bool = False) -> tuple[bool, str]:
     """Run one payload through every CloudOptima defense layer."""
     # 1. Input layer
@@ -98,7 +108,7 @@ def probe_payload(payload: str, obfuscated: bool = False) -> tuple[bool, str]:
         return True, "output_scanner"
 
     # 3. RAG poison filter
-    rag = ComplianceRAG(Settings())
+    rag = _get_rag()
     seeded = rag.seed_docs([("attack-doc", "pdpl", payload)])
     if seeded == 0:
         return True, "rag_index_filter"
